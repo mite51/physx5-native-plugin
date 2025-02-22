@@ -150,8 +150,6 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxActor* CreateStaticRigidActor(PxScene* scene, PxwTransformData* pose, PxShape* shape);
 
-    PHYSX_WRAPPER_API void GetRigidActorPose(PxRigidActor* actor, PxwTransformData* destPose);
-
     PHYSX_WRAPPER_API PxwSoftBodyHelper* CreateFEMSoftBody(PxScene* scene, const PxU32 numVertices, const PxVec3* triVerts, const PxU32 numTriangles, const int* triIndices, PxwTransformData* pose, PxFEMSoftBodyMaterial* material, PxReal density, PxU32 iterationCount, bool useCollisionMeshForSimulation, PxU32 numVoxelsAlongLongestAABBAxis);
 
     PHYSX_WRAPPER_API void ResetFEMSoftBody(PxwSoftBodyHelper* softBodyHelper);
@@ -175,6 +173,21 @@ extern "C" {
     PHYSX_WRAPPER_API void SetKinematicTarget(PxActor* actor, PxwTransformData* pose);
 
     PHYSX_WRAPPER_API void ReleaseMesh(PxTriangleMesh* mesh);
+
+    // Dynamic Rigid properties
+    PHYSX_WRAPPER_API void GetRigidActorPose(PxRigidActor* actor, PxwTransformData* destPose);
+
+    PHYSX_WRAPPER_API void SetMass(PxRigidDynamic* actor, PxReal mass);
+
+    PHYSX_WRAPPER_API PxReal GetMass(PxRigidDynamic* actor);
+    
+    PHYSX_WRAPPER_API void SetLinearVelocity(PxRigidDynamic* rigidDynamic, PxVec3* velocity);
+
+    PHYSX_WRAPPER_API PxVec3 GetLinearVelocity(PxRigidDynamic* rigidDynamic);   
+
+    PHYSX_WRAPPER_API void SetAngularVelocity(PxRigidDynamic* rigidDynamic, PxVec3* velocity);
+
+    PHYSX_WRAPPER_API PxVec3 GetAngularVelocity(PxRigidDynamic* rigidDynamic);  
 
     // Robotics
 

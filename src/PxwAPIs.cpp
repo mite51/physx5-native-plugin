@@ -254,10 +254,6 @@ PxActor* CreateStaticRigidActor(PxScene* scene, PxwTransformData* pose, PxShape*
 	return gPhysXWrapper.CreateStaticRigidActor(scene, *pose, shape);
 }
 
-void GetRigidActorPose(PxRigidActor* actor, PxwTransformData* destPose)
-{
-	*destPose = PxwTransformData(actor->getGlobalPose());
-}
 
 PxwSoftBodyHelper* CreateFEMSoftBody(PxScene* scene, const PxU32 numVertices, const PxVec3* triVerts, const PxU32 numTriangles, const int* triIndices, PxwTransformData* pose, PxFEMSoftBodyMaterial* material, PxReal density, PxU32 iterationCount, bool useCollisionMeshForSimulation, PxU32 numVoxelsAlongLongestAABBAxis)
 {
@@ -577,3 +573,41 @@ void ComputeGeomBounds(PxBounds3& bounds, const PxGeometry* geom, const PxwTrans
 {
 	return PxGeometryQuery::computeGeomBounds(bounds, *geom, pose->ToPxTransform(), offset, inflation);
 }
+
+void GetRigidActorPose(PxRigidActor* actor, PxwTransformData* destPose)
+{
+	*destPose = PxwTransformData(actor->getGlobalPose());
+}
+
+void SetMass(PxRigidDynamic* rigidDynamic, PxReal mass)
+{
+	PxRigidBodyExt::setMassAndUpdateInertia(*rigidDynamic, mass);
+}
+
+PxReal GetMass(PxRigidDynamic* rigidDynamic)
+{
+	return rigidDynamic->getMass();
+}
+
+void SetLinearVelocity(PxRigidDynamic* rigidDynamic, PxVec3* velocity)
+{
+	rigidDynamic->setLinearVelocity(*velocity);
+}
+
+PxVec3 GetLinearVelocity(PxRigidDynamic* rigidDynamic)
+{
+	return rigidDynamic->getLinearVelocity();
+}
+
+void SetAngularVelocity(PxRigidDynamic* rigidDynamic, PxVec3* velocity)
+{
+	rigidDynamic->setAngularVelocity(*velocity);
+}
+
+PxVec3 GetAngularVelocity(PxRigidDynamic* rigidDynamic)
+{
+	return rigidDynamic->getAngularVelocity();
+}
+
+
+
