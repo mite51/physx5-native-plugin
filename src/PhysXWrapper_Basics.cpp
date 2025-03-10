@@ -1,5 +1,7 @@
 #include "PhysXWrapper.h"
 
+#define PVD_HOST "127.0.0.1"	//Set this to the IP address of the system running the PhysX Visual Debugger that you want to connect to.
+
 namespace pxw
 {
 	PhysXWrapper::PhysXWrapper()
@@ -50,10 +52,19 @@ namespace pxw
 
 	PxScene* PhysXWrapper::CreateScene(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu)
 	{
+		//=====PVD
+		mPvd = PxCreatePvd(*mFoundation);
+		PxPvdTransport* transport = PxDefaultPvdSocketTransportCreate(PVD_HOST, 5425, 10);
+		mPvd->connect(*transport, PxPvdInstrumentationFlag::eALL);
+
+		PxInitExtensions(*mPhysics, mPvd);
+		//=====PVD
+
 		PxSceneDesc sceneDesc(mPhysics->getTolerancesScale());
 		sceneDesc.gravity = *gravity;
 		sceneDesc.cpuDispatcher = mDispatcher;
 		sceneDesc.filterShader = PxDefaultSimulationFilterShader;
+
 		sceneDesc.cudaContextManager = mCudaContextManager;
 		sceneDesc.staticStructure = pruningStructureType;
 		sceneDesc.flags |= PxSceneFlag::eENABLE_PCM;
@@ -71,6 +82,18 @@ namespace pxw
 
 		PxScene* scene = NULL;
 		scene = mPhysics->createScene(sceneDesc);
+
+		//=====PVD
+		PxPvdSceneClient* pvdClient = scene->getScenePvdClient();
+		if(pvdClient)
+		{
+			pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_CONSTRAINTS, true);
+			pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_CONTACTS, true);
+			pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_SCENEQUERIES, true);
+		}	
+		//=====PVD
+
+
 		mScenes.pushBack(scene);
 		PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "Create Scene\n");
 		return scene; // Return the scene

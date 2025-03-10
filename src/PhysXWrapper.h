@@ -3,6 +3,7 @@
 #include <utility>
 #include <limits.h>
 #include "PxPhysicsAPI.h"
+//#include "pvd/PxPvd.h"
 #include "extensions/PxParticleExt.h"
 #include <list>
 #include <sstream>
@@ -35,11 +36,18 @@ namespace pxw {
 		PxCudaContextManager* mCudaContextManager;
 		PxArray<PxScene*> mScenes;
 
+		PxPvd* mPvd = nullptr;
+
 		static void SetupCommonCookingParams(PxCookingParams& params, bool skipMeshCleanup, bool skipEdgeData);
 
 	public:
 		PhysXWrapper();
 		
+		PxPhysics* GetPhysics()
+		{
+			return mPhysics;
+		}
+
 		// PhysX basics
 		void InitPhysX();
 

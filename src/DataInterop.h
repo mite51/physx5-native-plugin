@@ -94,6 +94,8 @@ namespace pxw
 			eFIX = 0,
 			ePRISMATIC = 1,
 			eREVOLUTE = 2,
+			eSPHERICAL = 4, // TODO : implement
+
 		};
 
 		// Convert to PxArticulationJointType::Enum
@@ -104,6 +106,7 @@ namespace pxw
 			case eFIX: return PxArticulationJointType::eFIX;
 			case ePRISMATIC: return PxArticulationJointType::ePRISMATIC;
 			case eREVOLUTE: return PxArticulationJointType::eREVOLUTE;
+			case eSPHERICAL: return PxArticulationJointType::eSPHERICAL;// TODO : implement
 			default: return PxArticulationJointType::eUNDEFINED;
 			}
 		}

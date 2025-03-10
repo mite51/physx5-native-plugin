@@ -49,6 +49,10 @@ extern "C" {
 
     PHYSX_WRAPPER_API void RemoveActorFromScene(PxScene* scene, PxActor* actor);
 
+    PHYSX_WRAPPER_API PxBoxGeometry* CreateBoxGeometry(PxReal halfWidth, PxReal halfHeight, PxReal halfDepth);
+
+    PHYSX_WRAPPER_API PxCapsuleGeometry* CreateCapsuleGeometry(PxReal radius, PxReal halfHeight);
+
     PHYSX_WRAPPER_API PxShape* CreateShape(PxGeometry* geometry, PxMaterial* material, bool isExclusive);
 
     PHYSX_WRAPPER_API void ReleaseShape(PxShape* shape);
@@ -189,6 +193,123 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxVec3 GetAngularVelocity(PxRigidDynamic* rigidDynamic);  
 
+    // D6 joints
+    PHYSX_WRAPPER_API PxD6Joint* CreateD6Joint(PxRigidActor* actor0, PxRigidActor* actor1);
+
+    PHYSX_WRAPPER_API void ReleaseD6Joint(PxD6Joint* joint);
+
+    PHYSX_WRAPPER_API void SetD6JointDriveMotion(PxD6Joint* joint, PxD6Axis::Enum axis, PxD6Motion::Enum motionType);
+
+    PHYSX_WRAPPER_API void SetD6JointDrive(PxD6Joint* joint, PxD6Drive::Enum index, PxReal driveStiffness, PxReal driveDamping, PxReal driveForceLimit);
+
+    PHYSX_WRAPPER_API void SetD6DriveVelocity(PxD6Joint* joint, PxVec3* linearVelocity, PxVec3* angularVelocity);
+
+    PHYSX_WRAPPER_API void GetD6DriveVelocity(PxD6Joint* joint, PxVec3* linearVelocity, PxVec3* angularVelocity);
+
+    // Articulations
+    PHYSX_WRAPPER_API PxArticulationReducedCoordinate* CreateArticulationRoot(PxArticulationFlag::Enum flag, int solverIterationCount);
+
+    PHYSX_WRAPPER_API void AddArticulationRootToScene(PxScene* scene, PxArticulationReducedCoordinate* articulation);
+
+    PHYSX_WRAPPER_API void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordinate* articulation);
+
+    PHYSX_WRAPPER_API PxArticulationLink* CreateArticulationLink(PxArticulationReducedCoordinate* articulation, PxArticulationLink* parentLink, PxwTransformData* pose);
+
+    PHYSX_WRAPPER_API void SetArticulationLinkShape(PxArticulationLink* link, PxShape* shape);
+
+    PHYSX_WRAPPER_API void UpdateArticulationLinkMassAndInertia(PxArticulationLink* link, PxReal density);
+
+    PHYSX_WRAPPER_API PxArticulationJointReducedCoordinate* GetArticulationJoint(PxArticulationLink* link);
+
+    PHYSX_WRAPPER_API PxArticulationReducedCoordinate* GetLinkArticulation(PxArticulationLink* link);
+
+    PHYSX_WRAPPER_API void SetArticulationJointType(PxArticulationJointReducedCoordinate* joint, PxArticulationJointType::Enum type);
+
+    PHYSX_WRAPPER_API void SetArticulationJointParentPose(PxArticulationJointReducedCoordinate* joint, PxwTransformData* pose);
+
+    PHYSX_WRAPPER_API void SetArticulationJointChildPose(PxArticulationJointReducedCoordinate* joint, PxwTransformData* pose);
+
+    PHYSX_WRAPPER_API void SetArticulationJointMotion(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxArticulationMotion::Enum motion);
+
+    PHYSX_WRAPPER_API void SetArticulationJointLimitParams(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal lower, PxReal upper);
+
+    PHYSX_WRAPPER_API void SetArticulationJointDriveParams(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal stiffness, PxReal damping, PxReal maxForce);
+
+    PHYSX_WRAPPER_API void SetArticulationJointDriveTarget(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal target);
+
+    PHYSX_WRAPPER_API void SetArticulationJointDriveVelocity(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal velocity);
+
+    PHYSX_WRAPPER_API void ReleaseArticulation(PxArticulationReducedCoordinate* articulation);
+
+    PHYSX_WRAPPER_API PxU32 GetArticulationLinkCount(PxArticulationReducedCoordinate* articulation);
+
+    PHYSX_WRAPPER_API void GetArticulationLinks(PxArticulationReducedCoordinate* articulation, PxArticulationLink** userBuffer, PxU32 bufferSize, PxU32 startIndex);
+
+    PHYSX_WRAPPER_API void SetArticulationRootGlobalPose(PxArticulationReducedCoordinate* articulation, PxwTransformData* pose, bool autowake);
+
+    PHYSX_WRAPPER_API void SetArticulationSolverIterationCounts(PxArticulationReducedCoordinate* articulation, PxU32 positionIters, PxU32 velocityIters);
+
+    PHYSX_WRAPPER_API void SetArticulationSleepThreshold(PxArticulationReducedCoordinate* articulation, PxReal threshold);
+
+    PHYSX_WRAPPER_API void SetArticulationStabilizationThreshold(PxArticulationReducedCoordinate* articulation, PxReal threshold);
+
+    PHYSX_WRAPPER_API void SetArticulationWakeCounter(PxArticulationReducedCoordinate* articulation, PxReal wakeCounterValue);
+
+    PHYSX_WRAPPER_API void WakeUpArticulation(PxArticulationReducedCoordinate* articulation);
+
+    PHYSX_WRAPPER_API void PutArticulationToSleep(PxArticulationReducedCoordinate* articulation);
+
+    PHYSX_WRAPPER_API void SetArticulationMaxCOMLinearVelocity(PxArticulationReducedCoordinate* articulation, PxReal maxLinearVelocity);
+
+    PHYSX_WRAPPER_API void SetArticulationMaxCOMAngularVelocity(PxArticulationReducedCoordinate* articulation, PxReal maxAngularVelocity);
+
+    PHYSX_WRAPPER_API PxArticulationCache* CreateArticulationCache(PxArticulationReducedCoordinate* articulation);
+
+    PHYSX_WRAPPER_API void ReleaseArticulationCache(PxArticulationCache* cache);
+
+    PHYSX_WRAPPER_API void ApplyArticulationCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache& cache, PxArticulationCacheFlags flags);
+
+    PHYSX_WRAPPER_API void CopyInternalStateToArticulationCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache& cache, PxArticulationCacheFlags flags);
+
+    // Functions that operate on the inbound joint of an articulation link
+    PHYSX_WRAPPER_API void SetArticulationLinkJointDriveParams(PxArticulationLink* link, PxArticulationAxis::Enum axis, PxReal stiffness, PxReal damping, PxReal driveMaxForce);
+
+    PHYSX_WRAPPER_API void SetArticulationLinkJointMotion(PxArticulationLink* link, PxArticulationAxis::Enum axis, PxArticulationMotion::Enum motion);
+
+    PHYSX_WRAPPER_API void SetArticulationLinkJointLimits(PxArticulationLink* link, PxArticulationAxis::Enum axis, PxReal lower, PxReal upper);
+
+    // Articulation Link properties
+    PHYSX_WRAPPER_API void GetArticulationLinkGlobalPose(PxArticulationLink* link, PxwTransformData* destPose);
+
+    PHYSX_WRAPPER_API void SetArticulationLinkLinearDamping(PxArticulationLink* link, PxReal linearDamping);
+
+    PHYSX_WRAPPER_API PxReal GetArticulationLinkLinearDamping(PxArticulationLink* link);
+
+    PHYSX_WRAPPER_API void SetArticulationLinkAngularDamping(PxArticulationLink* link, PxReal angularDamping);
+
+    PHYSX_WRAPPER_API PxReal GetArticulationLinkAngularDamping(PxArticulationLink* link);
+
+    PHYSX_WRAPPER_API void SetArticulationLinkMaxLinearVelocity(PxArticulationLink* link, PxReal maxLinearVelocity);
+
+    PHYSX_WRAPPER_API PxReal GetArticulationLinkMaxLinearVelocity(PxArticulationLink* link);
+
+    PHYSX_WRAPPER_API void SetArticulationLinkMaxAngularVelocity(PxArticulationLink* link, PxReal maxAngularVelocity);
+
+    PHYSX_WRAPPER_API PxReal GetArticulationLinkMaxAngularVelocity(PxArticulationLink* link);
+
+    PHYSX_WRAPPER_API PxU32 GetArticulationLinkInboundJointDof(PxArticulationLink* link);
+
+    // Articulation Cache operations
+    PHYSX_WRAPPER_API void GetArticulationJointPositions(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, float* positions, PxU32 bufferSize);
+
+    PHYSX_WRAPPER_API void SetArticulationJointPositions(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, float* positions, PxU32 bufferSize);
+
+    PHYSX_WRAPPER_API void GetArticulationJointVelocities(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, float* velocities, PxU32 bufferSize);
+
+    PHYSX_WRAPPER_API void SetArticulationJointVelocities(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, float* velocities, PxU32 bufferSize);
+
+    PHYSX_WRAPPER_API PxU32 GetArticulationDofs(PxArticulationReducedCoordinate* articulation);
+
     // Robotics
 
     PHYSX_WRAPPER_API PxwArticulationKinematicTree* CreateArticulationKinematicTree(PxScene* scene, bool fixBase, bool disableSelfCollision);
@@ -207,8 +328,8 @@ extern "C" {
         float jointLimLower,
         float jointLimUpper,
         bool isDriveJoint,
-        float driveGainP,
-        float driveGainD,
+        float stiffness,
+        float damping,
         float driveMaxForce,
         float density
     );
@@ -234,8 +355,8 @@ extern "C" {
         PxShape* shape,
         float jointLimLower,
         float jointLimUpper,
-        float driveGainP,
-        float driveGainD,
+        float stiffness,
+        float damping,
         float driveMaxForce,
         float density
     );

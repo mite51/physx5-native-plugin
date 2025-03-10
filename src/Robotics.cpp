@@ -45,7 +45,7 @@ namespace pxw
 		return base;
 	}
 
-	PxArticulationLink* PxwArticulationKinematicTree::AddLink(PxArticulationLink* parentLink, PxwTransformData linkPose, PxwRobotJointType::Enum type, PxwTransformData jointPoseParent, PxwTransformData jointPoseChild, PxArticulationAxis::Enum dofAxis, PxShape* shape, float jointLimLower, float jointLimUpper, bool isDriveJoint, float driveGainP, float driveGainD, float driveMaxForce, float density)
+	PxArticulationLink* PxwArticulationKinematicTree::AddLink(PxArticulationLink* parentLink, PxwTransformData linkPose, PxwRobotJointType::Enum type, PxwTransformData jointPoseParent, PxwTransformData jointPoseChild, PxArticulationAxis::Enum dofAxis, PxShape* shape, float jointLimLower, float jointLimUpper, bool isDriveJoint, float stiffness, float damping, float driveMaxForce, float density)
 	{
 		PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "Add link\n");
 
@@ -78,13 +78,19 @@ namespace pxw
 		{
 			joint->setMotion(dofAxis, PxArticulationMotion::eLIMITED);
 			joint->setLimitParams(dofAxis, PxArticulationLimit(jointLimLower, jointLimUpper));
-			if (isDriveJoint) joint->setDriveParams(dofAxis, PxArticulationDrive(driveGainP, driveGainD, driveMaxForce));
+			if (isDriveJoint) joint->setDriveParams(dofAxis, PxArticulationDrive(stiffness, damping, driveMaxForce));
 		}
 		else if (type == PxwRobotJointType::eREVOLUTE)
 		{
 			joint->setMotion(dofAxis, PxArticulationMotion::eLIMITED);
 			joint->setLimitParams(dofAxis, PxArticulationLimit(jointLimLower, jointLimUpper));
-			if (isDriveJoint) joint->setDriveParams(dofAxis, PxArticulationDrive(driveGainP, driveGainD, driveMaxForce));
+			if (isDriveJoint) joint->setDriveParams(dofAxis, PxArticulationDrive(stiffness, damping, driveMaxForce));
+		}
+		else if (type == PxwRobotJointType::eSPHERICAL)
+		{
+			joint->setMotion(dofAxis, PxArticulationMotion::eLIMITED);
+			joint->setLimitParams(dofAxis, PxArticulationLimit(jointLimLower, jointLimUpper));
+			if (isDriveJoint) joint->setDriveParams(dofAxis, PxArticulationDrive(stiffness, damping, driveMaxForce));
 		}
 
 		joint->setParentPose(jointPoseParent.ToPxTransform());
@@ -197,8 +203,8 @@ namespace pxw
 		PxShape* shape,
 		float jointLimLower,
 		float jointLimUpper,
-		float driveGainP,
-		float driveGainD,
+		float stiffness,
+		float damping,
 		float driveMaxForce,
 		float density
 	) {
@@ -214,12 +220,16 @@ namespace pxw
 		{
 			dofAxis = PxArticulationAxis::eSWING1;
 		}
+		else if (type == PxwRobotJointType::eSPHERICAL)
+		{
+			//needs to do all 3 axis
+		}
 		else
 		{
 			isDriveJoint = false;
 		}
 		PxArticulationLink* link = PxwArticulationKinematicTree::AddLink(parentLink, linkPose, type, jointPoseParent, jointPoseChild, dofAxis,
-			shape, jointLimLower, jointLimUpper, isDriveJoint, driveGainP, driveGainD, driveMaxForce, density);
+			shape, jointLimLower, jointLimUpper, isDriveJoint, stiffness, damping, driveMaxForce, density);
 
 		mBodyLinks.push_back(link);
 
@@ -242,8 +252,8 @@ namespace pxw
 		PxShape* shape,
 		float jointLimLower,
 		float jointLimUpper,
-		float driveGainP,
-		float driveGainD,
+		float stiffness,
+		float damping,
 		float driveMaxForce,
 		float density
 	) {
@@ -265,7 +275,7 @@ namespace pxw
 			isDriveJoint = false;
 		}
 		PxArticulationLink* link = PxwArticulationKinematicTree::AddLink(parentLink, linkPose, type, jointPoseParent, jointPoseChild, dofAxis,
-			shape, jointLimLower, jointLimUpper, isDriveJoint, driveGainP, driveGainD, driveMaxForce, density);
+			shape, jointLimLower, jointLimUpper, isDriveJoint, stiffness, damping, driveMaxForce, density);
 
 		mEELinks.push_back(link);
 

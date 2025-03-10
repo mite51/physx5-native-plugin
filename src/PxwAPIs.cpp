@@ -2,11 +2,12 @@
 
 
 static PhysXWrapper gPhysXWrapper;
-
+static PxMaterial* gMaterial = NULL;
 // Basics
 
 bool InitializePhysX() {
 	gPhysXWrapper.InitPhysX();
+	gMaterial = gPhysXWrapper.GetPhysics()->createMaterial(0.5f, 0.5f, 0.f);
 	return true;
 }
 
@@ -54,6 +55,16 @@ void AddActorToScene(PxScene* scene, PxActor* actor)
 void RemoveActorFromScene(PxScene* scene, PxActor* actor)
 {
 	return gPhysXWrapper.RemoveActorFromScene(scene, actor);
+}
+
+PxBoxGeometry* CreateBoxGeometry(PxReal halfWidth, PxReal halfHeight, PxReal halfDepth)
+{
+	return new PxBoxGeometry(halfWidth, halfHeight, halfDepth);
+}
+
+PxCapsuleGeometry* CreateCapsuleGeometry(PxReal radius, PxReal halfHeight)
+{
+	return new PxCapsuleGeometry(radius, halfHeight);
 }
 
 PxShape* CreateShape(PxGeometry* geometry, PxMaterial* material, bool isExclusive)
@@ -329,9 +340,9 @@ PxArticulationLink* CreateArticulationKinematicTreeBase(PxwArticulationKinematic
 	return kinematicTree->CreateBase(*basePose, shape, density);
 }
 
-PxArticulationLink* AddLinkToArticulationKinematicTree(PxwArticulationKinematicTree* kinematicTree, PxArticulationLink* parentLink, PxwTransformData* linkPose, PxwRobotJointType::Enum type, PxwTransformData* jointPoseParent, PxwTransformData* jointPoseChild, PxArticulationAxis::Enum dofAxis, PxShape* shape, float jointLimLower, float jointLimUpper, bool isDriveJoint, float driveGainP, float driveGainD, float driveMaxForce, float density)
+PxArticulationLink* AddLinkToArticulationKinematicTree(PxwArticulationKinematicTree* kinematicTree, PxArticulationLink* parentLink, PxwTransformData* linkPose, PxwRobotJointType::Enum type, PxwTransformData* jointPoseParent, PxwTransformData* jointPoseChild, PxArticulationAxis::Enum dofAxis, PxShape* shape, float jointLimLower, float jointLimUpper, bool isDriveJoint, float stiffness, float damping, float driveMaxForce, float density)
 {
-	return kinematicTree->AddLink(parentLink, *linkPose, type, *jointPoseParent, *jointPoseChild, dofAxis, shape, jointLimLower, jointLimUpper, isDriveJoint, driveGainP, driveGainD, driveMaxForce, density);
+	return kinematicTree->AddLink(parentLink, *linkPose, type, *jointPoseParent, *jointPoseChild, dofAxis, shape, jointLimLower, jointLimUpper, isDriveJoint, stiffness, damping, driveMaxForce, density);
 }
 
 void ResetArticulationKinematicTree(PxwArticulationKinematicTree* kinematicTree)
@@ -375,13 +386,13 @@ PxArticulationLink* AddLinkToRobot(
 	PxShape* shape,
 	float jointLimLower,
 	float jointLimUpper,
-	float driveGainP,
-	float driveGainD,
+	float stiffness,
+	float damping,
 	float driveMaxForce,
 	float density
 )
 {
-	return robot->AddBodyLink(*linkPose, type, *jointPoseParent, *jointPoseChild, shape, jointLimLower, jointLimUpper, driveGainP, driveGainD, driveMaxForce, density);
+	return robot->AddBodyLink(*linkPose, type, *jointPoseParent, *jointPoseChild, shape, jointLimLower, jointLimUpper, stiffness, damping, driveMaxForce, density);
 }
 
 PxArticulationLink* AddEndEffectorLinkToRobot(
@@ -393,12 +404,12 @@ PxArticulationLink* AddEndEffectorLinkToRobot(
 	PxShape* shape,
 	float jointLimLower,
 	float jointLimUpper,
-	float driveGainP,
-	float driveGainD,
+	float stiffness,
+	float damping,
 	float driveMaxForce,
 	float density
 ) {
-	return robot->AddEndEffectorLink(*linkPose, type, *jointPoseParent, *jointPoseChild, shape, jointLimLower, jointLimUpper, driveGainP, driveGainD, driveMaxForce, density);
+	return robot->AddEndEffectorLink(*linkPose, type, *jointPoseParent, *jointPoseChild, shape, jointLimLower, jointLimUpper, stiffness, damping, driveMaxForce, density);
 }
 
 void ResetArticulationRobot(PxwArticulationRobot* robot)
@@ -574,6 +585,8 @@ void ComputeGeomBounds(PxBounds3& bounds, const PxGeometry* geom, const PxwTrans
 	return PxGeometryQuery::computeGeomBounds(bounds, *geom, pose->ToPxTransform(), offset, inflation);
 }
 
+// PxRigidActor/Dynamic
+
 void GetRigidActorPose(PxRigidActor* actor, PxwTransformData* destPose)
 {
 	*destPose = PxwTransformData(actor->getGlobalPose());
@@ -608,6 +621,350 @@ PxVec3 GetAngularVelocity(PxRigidDynamic* rigidDynamic)
 {
 	return rigidDynamic->getAngularVelocity();
 }
+
+// D6 joints
+PxD6Joint* CreateD6Joint(PxRigidActor* actor0, PxRigidActor* actor1)
+{
+	return PxD6JointCreate(*gPhysXWrapper.GetPhysics(), actor0, PxTransform(PxIdentity), actor1, PxTransform(PxIdentity));
+}
+
+void ReleaseD6Joint(PxD6Joint* joint)
+{
+	joint->release();
+}
+
+void SetD6JointDriveMotion(PxD6Joint* joint, PxD6Axis::Enum axis, PxD6Motion::Enum motionType)
+{
+	joint->setMotion(axis, motionType);
+}
+
+void SetD6JointDrive(PxD6Joint* joint, PxD6Drive::Enum index, PxReal driveStiffness, PxReal driveDamping, PxReal driveForceLimit)
+{
+	joint->setDrive(index, PxD6JointDrive(driveStiffness, driveDamping, driveForceLimit));
+}
+
+void SetD6DriveVelocity(PxD6Joint* joint, PxVec3* linearVelocity, PxVec3* angularVelocity)
+{
+	joint->setDriveVelocity(*linearVelocity, *angularVelocity);
+}
+
+void GetD6DriveVelocity(PxD6Joint* joint, PxVec3* linearVelocity, PxVec3* angularVelocity)
+{
+	joint->getDriveVelocity(*linearVelocity, *angularVelocity);
+}
+
+PxArticulationReducedCoordinate* CreateArticulationRoot(PxArticulationFlag::Enum flag, int solverIterationCount)
+{
+	PxArticulationReducedCoordinate* articulation = gPhysXWrapper.GetPhysics()->createArticulationReducedCoordinate();
+	if (articulation != nullptr)
+	{
+		articulation->setArticulationFlag(flag, true);
+		articulation->setSolverIterationCounts(solverIterationCount, 1);
+	}
+	return articulation;
+}
+
+void AddArticulationRootToScene(PxScene* scene, PxArticulationReducedCoordinate* articulation)
+ {
+	scene->addArticulation(*articulation);
+ }
+
+void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordinate* articulation)
+{
+	scene->removeArticulation(*articulation);
+}
+
+// Articulation
+ PxArticulationLink* CreateArticulationLink(PxArticulationReducedCoordinate* articulation, PxArticulationLink* parentLink, PxwTransformData* pose)
+ {
+	 PxArticulationLink* link = articulation->createLink(parentLink, pose->ToPxTransform());
+	 return link;
+ }
+
+ void SetArticulationLinkShape(PxArticulationLink* link, PxShape* shape)
+ {
+	//TODO replace gMaterial
+	PxRigidActorExt::createExclusiveShape(*link, shape->getGeometry(), *gMaterial);
+ }
+
+ void UpdateArticulationLinkMassAndInertia(PxArticulationLink* link, PxReal density)
+ {
+	PxRigidBodyExt::updateMassAndInertia(*link, density);
+ }
+
+ PxArticulationJointReducedCoordinate* GetArticulationJoint(PxArticulationLink* link)
+ {
+	return static_cast<PxArticulationJointReducedCoordinate*>(link->getInboundJoint());
+ }
+
+ PxArticulationReducedCoordinate* GetLinkArticulation(PxArticulationLink* link)
+ {
+	return &link->getArticulation();
+ }
+
+ void SetArticulationJointType(PxArticulationJointReducedCoordinate* joint, PxArticulationJointType::Enum type)
+ {
+	joint->setJointType(type);
+ }
+
+ void SetArticulationJointParentPose(PxArticulationJointReducedCoordinate* joint, PxwTransformData* pose)
+ {
+	joint->setParentPose(pose->ToPxTransform());
+ }
+
+ void SetArticulationJointChildPose(PxArticulationJointReducedCoordinate* joint, PxwTransformData* pose)
+ {
+	joint->setChildPose(pose->ToPxTransform());
+ }
+
+ void SetArticulationJointMotion(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxArticulationMotion::Enum motion)
+ {
+	joint->setMotion(axis, motion);
+ }
+
+ void SetArticulationJointLimitParams(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal lower, PxReal upper)
+ {
+	joint->setLimitParams(axis, PxArticulationLimit(lower, upper));
+ }
+
+ void SetArticulationJointDriveParams(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal stiffness, PxReal damping, PxReal maxForce)
+ {
+	joint->setDriveParams(axis, PxArticulationDrive(stiffness, damping, maxForce));
+ }
+
+ void SetArticulationJointDriveTarget(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal target)
+ {
+	joint->setDriveTarget(axis, target);
+ }
+
+ void SetArticulationJointDriveVelocity(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal velocity)
+ {
+	joint->setDriveVelocity(axis, velocity);
+ }
+
+ void ReleaseArticulation(PxArticulationReducedCoordinate* articulation)
+ {
+	articulation->release();
+ }
+
+ PxU32 GetArticulationLinkCount(PxArticulationReducedCoordinate* articulation)
+ {
+	return articulation->getNbLinks();
+ }
+
+ void GetArticulationLinks(PxArticulationReducedCoordinate* articulation, PxArticulationLink** userBuffer, PxU32 bufferSize, PxU32 startIndex)
+ {
+	articulation->getLinks(userBuffer, bufferSize, startIndex);
+ }
+
+ void SetArticulationRootGlobalPose(PxArticulationReducedCoordinate* articulation, PxwTransformData* pose, bool autowake)
+ {
+	articulation->setRootGlobalPose(pose->ToPxTransform(), autowake);
+ }
+
+ void SetArticulationSolverIterationCounts(PxArticulationReducedCoordinate* articulation, PxU32 positionIters, PxU32 velocityIters)
+ {
+	articulation->setSolverIterationCounts(positionIters, velocityIters);
+ }
+
+ void SetArticulationSleepThreshold(PxArticulationReducedCoordinate* articulation, PxReal threshold)
+ {
+	articulation->setSleepThreshold(threshold);
+ }
+
+ void SetArticulationStabilizationThreshold(PxArticulationReducedCoordinate* articulation, PxReal threshold)
+ {
+	articulation->setStabilizationThreshold(threshold);
+ }
+
+ void SetArticulationWakeCounter(PxArticulationReducedCoordinate* articulation, PxReal wakeCounterValue)
+ {
+	articulation->setWakeCounter(wakeCounterValue);
+ }
+
+ void WakeUpArticulation(PxArticulationReducedCoordinate* articulation)
+ {
+	articulation->wakeUp();
+ }
+
+ void PutArticulationToSleep(PxArticulationReducedCoordinate* articulation)
+ {
+	articulation->putToSleep();
+ }
+
+ void SetArticulationMaxCOMLinearVelocity(PxArticulationReducedCoordinate* articulation, PxReal maxLinearVelocity)
+ {
+	articulation->setMaxCOMLinearVelocity(maxLinearVelocity);
+ }
+
+ void SetArticulationMaxCOMAngularVelocity(PxArticulationReducedCoordinate* articulation, PxReal maxAngularVelocity)
+ {
+	articulation->setMaxCOMAngularVelocity(maxAngularVelocity);
+ }
+
+ PxArticulationCache* CreateArticulationCache(PxArticulationReducedCoordinate* articulation)
+ {
+	return articulation->createCache();
+ }
+
+ void ReleaseArticulationCache(PxArticulationCache* cache)
+ {
+	cache->release();
+ }
+
+ void ApplyArticulationCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache& cache, PxArticulationCacheFlags flags)
+ {
+	articulation->applyCache(cache, flags, true);
+ }
+
+ void CopyInternalStateToArticulationCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache& cache, PxArticulationCacheFlags flags)
+ {
+	articulation->copyInternalStateToCache(cache, flags);
+ }
+
+ void SetArticulationLinkJointDriveParams(PxArticulationLink* link, PxArticulationAxis::Enum axis, PxReal stiffness, PxReal damping, PxReal driveMaxForce)
+ {
+	PxArticulationJointReducedCoordinate* joint = static_cast<PxArticulationJointReducedCoordinate*>(link->getInboundJoint());
+	if (joint)
+	{
+		joint->setDriveParams(axis, PxArticulationDrive(stiffness, damping, driveMaxForce));
+	}
+ }
+
+ void SetArticulationLinkJointMotion(PxArticulationLink* link, PxArticulationAxis::Enum axis, PxArticulationMotion::Enum motion)
+ {
+	PxArticulationJointReducedCoordinate* joint = static_cast<PxArticulationJointReducedCoordinate*>(link->getInboundJoint());
+	if (joint)
+	{
+		joint->setMotion(axis, motion);
+	}
+ }
+
+void SetArticulationLinkJointLimits(PxArticulationLink* link, PxArticulationAxis::Enum axis, PxReal lower, PxReal upper)
+{
+	PxArticulationJointReducedCoordinate* joint = static_cast<PxArticulationJointReducedCoordinate*>(link->getInboundJoint());
+	if (joint)
+	{
+		joint->setLimitParams(axis, PxArticulationLimit(lower, upper));
+	}
+}
+
+// Articulation Link properties
+void GetArticulationLinkGlobalPose(PxArticulationLink* link, PxwTransformData* destPose)
+{
+	*destPose = PxwTransformData(link->getGlobalPose());
+}
+
+void SetArticulationLinkLinearDamping(PxArticulationLink* link, PxReal linearDamping)
+{
+	link->setLinearDamping(linearDamping);
+}
+
+PxReal GetArticulationLinkLinearDamping(PxArticulationLink* link)
+{
+	return link->getLinearDamping();
+}
+
+void SetArticulationLinkAngularDamping(PxArticulationLink* link, PxReal angularDamping)
+{
+	link->setAngularDamping(angularDamping);
+}
+
+PxReal GetArticulationLinkAngularDamping(PxArticulationLink* link)
+{
+	return link->getAngularDamping();
+}
+
+void SetArticulationLinkMaxLinearVelocity(PxArticulationLink* link, PxReal maxLinearVelocity)
+{
+	link->setMaxLinearVelocity(maxLinearVelocity);
+}
+
+PxReal GetArticulationLinkMaxLinearVelocity(PxArticulationLink* link)
+{
+	return link->getMaxLinearVelocity();
+}
+
+void SetArticulationLinkMaxAngularVelocity(PxArticulationLink* link, PxReal maxAngularVelocity)
+{
+	link->setMaxAngularVelocity(maxAngularVelocity);
+}
+
+PxReal GetArticulationLinkMaxAngularVelocity(PxArticulationLink* link)
+{
+	return link->getMaxAngularVelocity();
+}
+
+PxU32 GetArticulationLinkInboundJointDof(PxArticulationLink* link)
+{
+	return link->getInboundJointDof();
+}
+
+// Articulation Cache operations
+void GetArticulationJointPositions(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, float* positions, PxU32 bufferSize)
+{
+	articulation->copyInternalStateToCache(*cache, PxArticulationCacheFlag::ePOSITION);
+	PxReal* jointPositions = cache->jointPosition;
+	PxU32 dofs = articulation->getDofs();
+	PxU32 copySize = PxMin(bufferSize, dofs);
+	memcpy(positions, jointPositions, copySize * sizeof(float));
+}
+
+void SetArticulationJointPositions(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, float* positions, PxU32 bufferSize)
+{
+	PxU32 dofs = articulation->getDofs();
+	PxU32 copySize = PxMin(bufferSize, dofs);
+	memcpy(cache->jointPosition, positions, copySize * sizeof(float));
+	articulation->applyCache(*cache, PxArticulationCacheFlag::ePOSITION, true);
+}
+
+void GetArticulationJointVelocities(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, float* velocities, PxU32 bufferSize)
+{
+	articulation->copyInternalStateToCache(*cache, PxArticulationCacheFlag::eVELOCITY);
+	PxReal* jointVelocities = cache->jointVelocity;
+	PxU32 dofs = articulation->getDofs();
+	PxU32 copySize = PxMin(bufferSize, dofs);
+	memcpy(velocities, jointVelocities, copySize * sizeof(float));
+}
+
+void SetArticulationJointVelocities(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, float* velocities, PxU32 bufferSize)
+{
+	PxU32 dofs = articulation->getDofs();
+	PxU32 copySize = PxMin(bufferSize, dofs);
+	memcpy(cache->jointVelocity, velocities, copySize * sizeof(float));
+	articulation->applyCache(*cache, PxArticulationCacheFlag::eVELOCITY, true);
+}
+
+PxU32 GetArticulationDofs(PxArticulationReducedCoordinate* articulation)
+{
+	return articulation->getDofs();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
