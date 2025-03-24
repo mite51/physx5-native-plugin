@@ -684,7 +684,11 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
  void SetArticulationLinkShape(PxArticulationLink* link, PxShape* shape)
  {
 	//TODO replace gMaterial
-	PxRigidActorExt::createExclusiveShape(*link, shape->getGeometry(), *gMaterial);
+	//PxRigidActorExt::createExclusiveShape(*link, shape->getGeometry(), *gMaterial);
+
+	//Switched to attachShape, otherwise shape->setLocalPose is not working
+	link->attachShape(*shape);
+	
  }
 
  void UpdateArticulationLinkMassAndInertia(PxArticulationLink* link, PxReal density)
@@ -741,6 +745,7 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
  {
 	joint->setDriveVelocity(axis, velocity);
  }
+ 
 
  void ReleaseArticulation(PxArticulationReducedCoordinate* articulation)
  {
@@ -900,6 +905,18 @@ PxU32 GetArticulationLinkInboundJointDof(PxArticulationLink* link)
 	return link->getInboundJointDof();
 }
 
+void SetArticulationJointArmature(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal armature)
+{
+    joint->setArmature(axis, armature);
+}
+
+PxReal GetArticulationJointArmature(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis)
+{
+    return joint->getArmature(axis);
+}
+
+
+
 // Articulation Cache operations
 void GetArticulationJointPositions(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, float* positions, PxU32 bufferSize)
 {
@@ -938,6 +955,25 @@ void SetArticulationJointVelocities(PxArticulationReducedCoordinate* articulatio
 PxU32 GetArticulationDofs(PxArticulationReducedCoordinate* articulation)
 {
 	return articulation->getDofs();
+}
+
+void GetShapeLocalPose(PxShape* shape, PxwTransformData* destPose)
+{
+	*destPose = PxwTransformData(shape->getLocalPose());
+}
+
+void SetShapeLocalPose(PxShape* shape, PxwTransformData* pose)
+{
+	shape->setLocalPose(pose->ToPxTransform());
+}
+
+// Add near the top with other basic PhysX functions
+PHYSX_WRAPPER_API const char* GetPhysxErrors() {
+	// Get the errors and store in a static buffer
+	// Note: This is not thread-safe, but matches typical C API patterns
+	static std::string errorBuffer;
+	errorBuffer = gPhysXWrapper.GetAndClearErrors();
+	return errorBuffer.c_str();
 }
 
 

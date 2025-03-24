@@ -15,17 +15,47 @@
 #include "SoftBodyHelper.h"
 #include "Robotics.h"
 
+#include <mutex>
+#include <sstream>
+
 using namespace physx;
 using namespace ExtGpu;
 using namespace std;
 
-
 namespace pxw {
+
+	// Add this new class before PhysXWrapper
+	class BufferedErrorCallback : public PxDefaultErrorCallback 
+	{
+	private:
+		std::string mErrorBuffer;
+		std::mutex mMutex;
+
+	public:
+		virtual void reportError(PxErrorCode::Enum code, const char* message, const char* file, int line) override {
+			std::lock_guard<std::mutex> lock(mMutex);
+			// Format error message
+			std::stringstream ss;
+			ss << "PhysX Error [" << code << "] in " << file << ":" << line << " - " << message << "\n";
+			mErrorBuffer += ss.str();
+			
+			// Also call parent implementation for default console output
+			PxDefaultErrorCallback::reportError(code, message, file, line);
+		}
+
+		std::string getAndClearErrors() {
+			std::lock_guard<std::mutex> lock(mMutex);
+			std::string errors = mErrorBuffer;
+			mErrorBuffer.clear();
+			return errors;
+		}
+	};
+
 	class PhysXWrapper
 	{
 	private:
 		PxDefaultAllocator mAllocator;
-		PxDefaultErrorCallback mErrorCallback;
+		BufferedErrorCallback mErrorCallback;
 		PxFoundation* mFoundation;
 		PxPhysics* mPhysics;
 		PxDefaultCpuDispatcher* mDispatcher;
@@ -37,6 +67,7 @@ namespace pxw {
 		PxArray<PxScene*> mScenes;
 
 		PxPvd* mPvd = nullptr;
+		PxPvdTransport* mTransport = nullptr;
 
 		static void SetupCommonCookingParams(PxCookingParams& params, bool skipMeshCleanup, bool skipEdgeData);
 
@@ -167,5 +198,10 @@ namespace pxw {
 			const float surfaceTension, const float cohesion, const float lift, const float drag, const float cflCoefficient, const float gravityScale);
 
 		PxFEMSoftBodyMaterial* CreateFEMSoftBodyMaterial(const float youngs, const float poissons, const float dynamicFriction, const float damping, const PxFEMSoftBodyMaterialModel::Enum model = PxFEMSoftBodyMaterialModel::eCO_ROTATIONAL);
+
+		// Add this new method
+		std::string GetAndClearErrors() {
+			return mErrorCallback.getAndClearErrors();
+		}
 	};
 }

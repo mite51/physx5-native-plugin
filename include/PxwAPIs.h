@@ -299,6 +299,10 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxU32 GetArticulationLinkInboundJointDof(PxArticulationLink* link);
 
+    PHYSX_WRAPPER_API void SetArticulationJointArmature(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal armature);
+
+    PHYSX_WRAPPER_API PxReal GetArticulationJointArmature(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis);
+
     // Articulation Cache operations
     PHYSX_WRAPPER_API void GetArticulationJointPositions(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, float* positions, PxU32 bufferSize);
 
@@ -462,4 +466,12 @@ extern "C" {
     PHYSX_WRAPPER_API float PointDistance(const PxVec3* point, const PxGeometry* geom, const PxwTransformData* pose, PxVec3* closestPoint, PxU32* closestIndex);
     
     PHYSX_WRAPPER_API void ComputeGeomBounds(PxBounds3& bounds, const PxGeometry* geom, const PxwTransformData* pose, float offset, float inflation);
+
+    // Shape functions
+    PHYSX_WRAPPER_API void GetShapeLocalPose(PxShape* shape, PxwTransformData* destPose);
+    PHYSX_WRAPPER_API void SetShapeLocalPose(PxShape* shape, PxwTransformData* pose);
+
+    // Add this new function declaration
+    PHYSX_WRAPPER_API const char* GetPhysxErrors();
+
 }
