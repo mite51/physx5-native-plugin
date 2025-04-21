@@ -155,7 +155,7 @@ namespace pxw {
 
 		// Rigid and Soft Bodies
 
-		PxActor* CreateDynamicRigidActor(PxScene* scene, const PxwTransformData transform, PxShape* shape);
+		PxRigidDynamic* CreateDynamicRigidActor(PxScene* scene, const PxwTransformData transform, PxShape* shape);
 
 		PxActor* CreateKinematicRigidActor(PxScene* scene, const PxwTransformData transform, PxShape* shape);
 

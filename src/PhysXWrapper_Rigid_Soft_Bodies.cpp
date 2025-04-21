@@ -4,7 +4,7 @@ using namespace pxw;
 
 namespace pxw
 {
-	PxActor *PhysXWrapper::CreateDynamicRigidActor(PxScene* /*scene*/, const PxwTransformData transform, PxShape *shape)
+	PxRigidDynamic*PhysXWrapper::CreateDynamicRigidActor(PxScene* /*scene*/, const PxwTransformData transform, PxShape *shape)
 	{
 		PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "Add dynamic rigid body\n");
 		PxRigidDynamic* actor = mPhysics->createRigidDynamic(transform.ToPxTransform());

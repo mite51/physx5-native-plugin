@@ -193,6 +193,10 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxVec3 GetAngularVelocity(PxRigidDynamic* rigidDynamic);  
 
+    PHYSX_WRAPPER_API void SetRigidDynamicStabilizationThreshold(PxRigidDynamic* rigidDynamic, PxReal threshold);
+
+    PHYSX_WRAPPER_API PxReal GetRigidDynamicStabilizationThreshold(PxRigidDynamic* rigidDynamic);
+
     // D6 joints
     PHYSX_WRAPPER_API PxD6Joint* CreateD6Joint(PxRigidActor* actor0, PxRigidActor* actor1);
 
@@ -297,6 +301,8 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxReal GetArticulationLinkMaxAngularVelocity(PxArticulationLink* link);
 
+    PHYSX_WRAPPER_API PxU32 GetArticulationLinkIndex(PxArticulationLink* link);
+    
     PHYSX_WRAPPER_API PxU32 GetArticulationLinkInboundJointDof(PxArticulationLink* link);
 
     PHYSX_WRAPPER_API void SetArticulationJointArmature(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal armature);
@@ -473,5 +479,27 @@ extern "C" {
 
     // Add this new function declaration
     PHYSX_WRAPPER_API const char* GetPhysxErrors();
+
+    // Additional Articulation Cache functions
+    PHYSX_WRAPPER_API PxArticulationCache* CreateArticulationInternalStateCache(PxArticulationReducedCoordinate* articulation);
+    
+    PHYSX_WRAPPER_API void ReleaseArticulationInternalStateCache(PxArticulationCache* cache);
+    
+    PHYSX_WRAPPER_API void CopyArticulationInternalStateToCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, PxU32/*PxArticulationCacheFlags*/ flags);
+    
+    PHYSX_WRAPPER_API void ApplyArticulationInternalStateCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, PxU32/*PxArticulationCacheFlags*/ flags);
+
+    // Direct cache access functions
+    PHYSX_WRAPPER_API void GetArticulationCacheJointPositions(PxArticulationCache* cache, float* positions, PxU32 bufferSize);
+    PHYSX_WRAPPER_API void SetArticulationCacheJointPositions(PxArticulationCache* cache, float* positions, PxU32 bufferSize);
+
+    PHYSX_WRAPPER_API void GetArticulationCacheJointVelocities(PxArticulationCache* cache, float* velocities, PxU32 bufferSize);
+    PHYSX_WRAPPER_API void SetArticulationCacheJointVelocities(PxArticulationCache* cache, float* velocities, PxU32 bufferSize);
+
+    PHYSX_WRAPPER_API void GetArticulationCacheJointAccelerations(PxArticulationCache* cache, float* accelerations, PxU32 bufferSize);
+    PHYSX_WRAPPER_API void SetArticulationCacheJointAccelerations(PxArticulationCache* cache, float* accelerations, PxU32 bufferSize);
+
+    PHYSX_WRAPPER_API void GetArticulationCacheJointForces(PxArticulationCache* cache, float* forces, PxU32 bufferSize);
+    PHYSX_WRAPPER_API void SetArticulationCacheJointForces(PxArticulationCache* cache, float* forces, PxU32 bufferSize);
 
 }

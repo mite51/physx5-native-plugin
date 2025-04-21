@@ -622,6 +622,16 @@ PxVec3 GetAngularVelocity(PxRigidDynamic* rigidDynamic)
 	return rigidDynamic->getAngularVelocity();
 }
 
+void SetRigidDynamicStabilizationThreshold(PxRigidDynamic* rigidDynamic, PxReal threshold)
+{
+	rigidDynamic->setStabilizationThreshold(threshold);
+}
+
+PxReal GetRigidDynamicStabilizationThreshold(PxRigidDynamic* rigidDynamic)
+{
+	return rigidDynamic->getStabilizationThreshold();
+}
+
 // D6 joints
 PxD6Joint* CreateD6Joint(PxRigidActor* actor0, PxRigidActor* actor1)
 {
@@ -659,7 +669,8 @@ PxArticulationReducedCoordinate* CreateArticulationRoot(PxArticulationFlag::Enum
 	if (articulation != nullptr)
 	{
 		articulation->setArticulationFlag(flag, true);
-		articulation->setSolverIterationCounts(solverIterationCount, 1);
+		//TODO make separate solver iteration counts for position and velocity
+		articulation->setSolverIterationCounts(solverIterationCount, solverIterationCount);
 	}
 	return articulation;
 }
@@ -678,6 +689,7 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
  PxArticulationLink* CreateArticulationLink(PxArticulationReducedCoordinate* articulation, PxArticulationLink* parentLink, PxwTransformData* pose)
  {
 	 PxArticulationLink* link = articulation->createLink(parentLink, pose->ToPxTransform());
+	 link->setMaxDepenetrationVelocity(300.0f);
 	 return link;
  }
 
@@ -900,6 +912,11 @@ PxReal GetArticulationLinkMaxAngularVelocity(PxArticulationLink* link)
 	return link->getMaxAngularVelocity();
 }
 
+PxU32 GetArticulationLinkIndex(PxArticulationLink* link)
+{
+	return link->getLinkIndex();
+}
+
 PxU32 GetArticulationLinkInboundJointDof(PxArticulationLink* link)
 {
 	return link->getInboundJointDof();
@@ -974,6 +991,122 @@ PHYSX_WRAPPER_API const char* GetPhysxErrors() {
 	static std::string errorBuffer;
 	errorBuffer = gPhysXWrapper.GetAndClearErrors();
 	return errorBuffer.c_str();
+}
+
+// Additional Articulation Cache functions
+PxArticulationCache* CreateArticulationInternalStateCache(PxArticulationReducedCoordinate* articulation)
+{
+    if (!articulation)
+    {
+        PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, __FILE__, __LINE__, 
+            "CreateArticulationInternalStateCache: articulation pointer is NULL");
+        return NULL;
+    }
+    
+	articulation->createCache();
+}
+
+void ReleaseArticulationInternalStateCache(PxArticulationCache* cache)
+{
+    cache->release();
+}
+
+void CopyArticulationInternalStateToCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, PxU32/*PxArticulationCacheFlags*/ flags)
+{
+	if (!articulation)
+	{
+		PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, __FILE__, __LINE__,
+			"CreateArticulationInternalStateCache: articulation pointer is NULL");
+		return;
+	}
+
+
+	articulation->copyInternalStateToCache(*cache, (PxArticulationCacheFlags)flags);
+}
+
+void ApplyArticulationInternalStateCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, PxU32/*PxArticulationCacheFlags*/ flags)
+{
+	if (!articulation)
+	{
+		PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, __FILE__, __LINE__,
+			"CreateArticulationInternalStateCache: articulation pointer is NULL");
+		return;
+	}
+	if (!cache)
+	{
+		PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, __FILE__, __LINE__,
+			"CreateArticulationInternalStateCache: articulation cache pointer is NULL");
+		return;
+	}
+
+    articulation->applyCache(*cache, (PxArticulationCacheFlags)flags, true);
+
+	
+}
+
+// Direct cache access functions
+void GetArticulationCacheJointPositions(PxArticulationCache* cache, float* positions, PxU32 bufferSize)
+{
+    if (cache && cache->jointPosition && positions)
+    {
+        memcpy(positions, cache->jointPosition, bufferSize * sizeof(float));
+    }
+}
+
+void SetArticulationCacheJointPositions(PxArticulationCache* cache, float* positions, PxU32 bufferSize)
+{
+    if (cache && cache->jointPosition && positions)
+    {
+        memcpy(cache->jointPosition, positions, bufferSize * sizeof(float));
+    }
+}
+
+void GetArticulationCacheJointVelocities(PxArticulationCache* cache, float* velocities, PxU32 bufferSize)
+{
+    if (cache && cache->jointVelocity && velocities)
+    {
+        memcpy(velocities, cache->jointVelocity, bufferSize * sizeof(float));
+    }
+}
+
+void SetArticulationCacheJointVelocities(PxArticulationCache* cache, float* velocities, PxU32 bufferSize)
+{
+    if (cache && cache->jointVelocity && velocities)
+    {
+        memcpy(cache->jointVelocity, velocities, bufferSize * sizeof(float));
+    }
+}
+
+void GetArticulationCacheJointAccelerations(PxArticulationCache* cache, float* accelerations, PxU32 bufferSize)
+{
+    if (cache && cache->jointAcceleration && accelerations)
+    {
+        memcpy(accelerations, cache->jointAcceleration, bufferSize * sizeof(float));
+    }
+}
+
+void SetArticulationCacheJointAccelerations(PxArticulationCache* cache, float* accelerations, PxU32 bufferSize)
+{
+    if (cache && cache->jointAcceleration && accelerations)
+    {
+        memcpy(cache->jointAcceleration, accelerations, bufferSize * sizeof(float));
+    }
+}
+
+void GetArticulationCacheJointForces(PxArticulationCache* cache, float* forces, PxU32 bufferSize)
+{
+    if (cache && cache->jointForce && forces)
+    {
+        memcpy(forces, cache->jointForce, bufferSize * sizeof(float));
+    }
+}
+
+void SetArticulationCacheJointForces(PxArticulationCache* cache, float* forces, PxU32 bufferSize)
+{
+    if (cache && cache->jointForce && forces)
+    {
+        memcpy(cache->jointForce, forces, bufferSize * sizeof(float));
+    }
 }
 
 
