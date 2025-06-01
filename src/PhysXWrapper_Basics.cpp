@@ -55,6 +55,7 @@ namespace pxw
 			}
 			if (mCudaContextManager == NULL)
 			{
+			{
 				PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, "Failed to initialize CUDA!\n");
 			}
 
@@ -115,6 +116,8 @@ namespace pxw
 		sceneDesc.cudaContextManager = mCudaContextManager;
 		sceneDesc.staticStructure = pruningStructureType;
 		sceneDesc.flags |= PxSceneFlag::eENABLE_PCM;
+		sceneDesc.flags |= PxSceneFlag::eENABLE_CCD;
+		
 		sceneDesc.solverType = solverType;
 		if (useGpu)
 		{
