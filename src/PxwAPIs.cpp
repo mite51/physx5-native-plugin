@@ -67,6 +67,11 @@ PxCapsuleGeometry* CreateCapsuleGeometry(PxReal radius, PxReal halfHeight)
 	return new PxCapsuleGeometry(radius, halfHeight);
 }
 
+PxSphereGeometry* CreateSphereGeometry(PxReal radius)
+{
+	return new PxSphereGeometry(radius);
+}
+
 PxShape* CreateShape(PxGeometry* geometry, PxMaterial* material, bool isExclusive)
 {
 	return gPhysXWrapper.CreateShape(geometry, material, isExclusive);

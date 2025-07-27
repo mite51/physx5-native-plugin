@@ -53,6 +53,8 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxCapsuleGeometry* CreateCapsuleGeometry(PxReal radius, PxReal halfHeight);
 
+    PHYSX_WRAPPER_API PxSphereGeometry* CreateSphereGeometry(PxReal radius);
+
     PHYSX_WRAPPER_API PxShape* CreateShape(PxGeometry* geometry, PxMaterial* material, bool isExclusive);
 
     PHYSX_WRAPPER_API void ReleaseShape(PxShape* shape);
