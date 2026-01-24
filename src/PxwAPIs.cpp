@@ -597,6 +597,11 @@ void GetRigidActorPose(PxRigidActor* actor, PxwTransformData* destPose)
 	*destPose = PxwTransformData(actor->getGlobalPose());
 }
 
+void SetRigidActorPose(PxRigidActor* actor, PxwTransformData* pose, bool autowake)
+{
+	actor->setGlobalPose(pose->ToPxTransform(), autowake);
+}
+
 void SetMass(PxRigidDynamic* rigidDynamic, PxReal mass)
 {
 	PxRigidBodyExt::setMassAndUpdateInertia(*rigidDynamic, mass);
@@ -700,12 +705,7 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
 
  void SetArticulationLinkShape(PxArticulationLink* link, PxShape* shape)
  {
-	//TODO replace gMaterial
-	//PxRigidActorExt::createExclusiveShape(*link, shape->getGeometry(), *gMaterial);
-
-	//Switched to attachShape, otherwise shape->setLocalPose is not working
 	link->attachShape(*shape);
-	
  }
 
  void UpdateArticulationLinkMassAndInertia(PxArticulationLink* link, PxReal density)
@@ -748,9 +748,11 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
 	joint->setLimitParams(axis, PxArticulationLimit(lower, upper));
  }
 
- void SetArticulationJointDriveParams(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal stiffness, PxReal damping, PxReal maxForce)
+ void SetArticulationJointDriveParams(PxArticulationJointReducedCoordinate* joint, 
+	PxArticulationAxis::Enum axis, PxReal stiffness, PxReal damping, PxReal maxForce, 
+	PxArticulationDriveType::Enum driveType = PxArticulationDriveType::eFORCE)
  {
-	joint->setDriveParams(axis, PxArticulationDrive(stiffness, damping, maxForce));
+	joint->setDriveParams(axis, PxArticulationDrive(stiffness, damping, maxForce, driveType));
  }
 
  void SetArticulationJointDriveTarget(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal target)

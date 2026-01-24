@@ -2,6 +2,8 @@
 
 #define PVD_HOST "127.0.0.1"	//Set this to the IP address of the system running the PhysX Visual Debugger that you want to connect to.
 
+// Targets PHYSX 5.4.2.9950ad0d
+
 namespace pxw
 {
 	PhysXWrapper::PhysXWrapper()
@@ -54,7 +56,6 @@ namespace pxw
 				}
 			}
 			if (mCudaContextManager == NULL)
-			{
 			{
 				PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, "Failed to initialize CUDA!\n");
 			}

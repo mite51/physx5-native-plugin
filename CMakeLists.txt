@@ -75,8 +75,8 @@ add_compile_definitions(PhysXUnity INTERFACE API_EXPORTS)
 # Disable "Treat Warnings as Errors" for all platforms
 if(MSVC)
     target_compile_options(PhysXUnity PRIVATE /W4 /WX-)
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MD")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MDd")
     set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT")
     set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /MTd")
 else()
@@ -92,6 +92,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         PhysXCommon_static_64
         PhysXCooking_static_64
         PhysXExtensions_static_64
+        PhysXPvdSDK_static_64
         PhysXGpu_64
         -Wl,--end-group
         cuda
@@ -107,6 +108,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         PhysXCommon_64
         PhysXCooking_64
         PhysXExtensions_static_64
+        PhysXPvdSDK_static_64
     )
 endif()
 

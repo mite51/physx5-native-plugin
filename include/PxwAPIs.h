@@ -183,6 +183,8 @@ extern "C" {
     // Dynamic Rigid properties
     PHYSX_WRAPPER_API void GetRigidActorPose(PxRigidActor* actor, PxwTransformData* destPose);
 
+    PHYSX_WRAPPER_API void SetRigidActorPose(PxRigidActor* actor, PxwTransformData* pose, bool auto_awake);
+
     PHYSX_WRAPPER_API void SetMass(PxRigidDynamic* actor, PxReal mass);
 
     PHYSX_WRAPPER_API PxReal GetMass(PxRigidDynamic* actor);
@@ -239,7 +241,7 @@ extern "C" {
 
     PHYSX_WRAPPER_API void SetArticulationJointLimitParams(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal lower, PxReal upper);
 
-    PHYSX_WRAPPER_API void SetArticulationJointDriveParams(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal stiffness, PxReal damping, PxReal maxForce);
+    PHYSX_WRAPPER_API void SetArticulationJointDriveParams(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal stiffness, PxReal damping, PxReal maxForce, PxArticulationDriveType::Enum driveType);
 
     PHYSX_WRAPPER_API void SetArticulationJointDriveTarget(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal target);
 
