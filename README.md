@@ -1,5 +1,7 @@
 # PhysX 5 Native Plugin for Unity
 
+# Built for to Physx 5.4.2.9950ad0d
+
 A simple wrapper for using PhysX 5 in Unity.
 
 ## Supported Platforms
@@ -22,6 +24,8 @@ ParentDirectory/
 ```
 
 ## Build
+
+Note that DCMAKE_BUILD_TYPE determines the physx libs used for both Release and Debug builds after the project is made
 
 ```bash
 git clone git@github.com:yafei-ou/physx5-native-plugin.git
