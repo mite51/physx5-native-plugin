@@ -305,6 +305,16 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxReal GetArticulationLinkMaxAngularVelocity(PxArticulationLink* link);
 
+    PHYSX_WRAPPER_API PxVec3 GetArticulationLinkLinearVelocity(PxArticulationLink* link);
+
+    PHYSX_WRAPPER_API PxVec3 GetArticulationLinkAngularVelocity(PxArticulationLink* link);
+
+    PHYSX_WRAPPER_API PxVec3 GetArticulationLinkCMassLocalPosition(PxArticulationLink* link);
+
+    PHYSX_WRAPPER_API void SetArticulationRootLinearVelocity(PxArticulationReducedCoordinate* articulation, PxVec3* velocity, bool autowake);
+
+    PHYSX_WRAPPER_API void SetArticulationRootAngularVelocity(PxArticulationReducedCoordinate* articulation, PxVec3* velocity, bool autowake);
+
     PHYSX_WRAPPER_API PxU32 GetArticulationLinkIndex(PxArticulationLink* link);
     
     PHYSX_WRAPPER_API PxU32 GetArticulationLinkInboundJointDof(PxArticulationLink* link);
@@ -492,6 +502,8 @@ extern "C" {
     PHYSX_WRAPPER_API void CopyArticulationInternalStateToCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, PxU32/*PxArticulationCacheFlags*/ flags);
     
     PHYSX_WRAPPER_API void ApplyArticulationInternalStateCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache* cache, PxU32/*PxArticulationCacheFlags*/ flags);
+
+    PHYSX_WRAPPER_API void UpdateArticulationKinematic(PxArticulationReducedCoordinate* articulation, PxU32 flags);
 
     // Direct cache access functions
     PHYSX_WRAPPER_API void GetArticulationCacheJointPositions(PxArticulationCache* cache, float* positions, PxU32 bufferSize);

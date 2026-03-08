@@ -60,25 +60,6 @@ namespace pxw
 				PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, "Failed to initialize CUDA!\n");
 			}
 
-
-			PxSceneDesc sceneDesc(mPhysics->getTolerancesScale());
-			sceneDesc.cpuDispatcher = mDispatcher;
-			sceneDesc.filterShader = PxDefaultSimulationFilterShader;
-			PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, "creating client!\n");
-			PxScene* scene = mPhysics->createScene(sceneDesc);
-			PxPvdSceneClient* pvdClient = scene->getScenePvdClient();
-			if (pvdClient)
-			{
-				pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_CONSTRAINTS, true);
-				pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_CONTACTS, true);
-				pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_SCENEQUERIES, true);
-			}
-			else
-			{
-				PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, "pvdClient missing!\n");
-			}
-
-			//
 			mDefaultMaterial = mPhysics->createMaterial(0.5f, 0.5f, 0.0f);
 		}
 	}
@@ -117,9 +98,8 @@ namespace pxw
 		sceneDesc.cudaContextManager = mCudaContextManager;
 		sceneDesc.staticStructure = pruningStructureType;
 		sceneDesc.flags |= PxSceneFlag::eENABLE_PCM;
-		sceneDesc.flags |= PxSceneFlag::eENABLE_CCD;
+		sceneDesc.flags |= PxSceneFlag::eENABLE_ACTIVE_ACTORS;// eENABLE_CCD; //HACK
 		
-		sceneDesc.solverType = solverType;
 		if (useGpu)
 		{
 			// enable GPU dynamics and collision
@@ -131,8 +111,12 @@ namespace pxw
 			sceneDesc.broadPhaseType = PxBroadPhaseType::eABP;
 		}
 
+		sceneDesc.solverType = solverType;
+		sceneDesc.filterShader = PxDefaultSimulationFilterShader;
+		sceneDesc.bounceThresholdVelocity = 0.000001f;
 
-		PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, "creating client!\n");
+		std::string message = "creating client! solver type: " + to_string((int)solverType) + " useGpu: " + to_string(useGpu) + "\n";
+		PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, message.c_str());
 		PxScene* scene = mPhysics->createScene(sceneDesc);
 
 		// Make sure PVD flags are set immediately after scene creation

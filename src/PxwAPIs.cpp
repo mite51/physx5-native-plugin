@@ -680,7 +680,8 @@ PxArticulationReducedCoordinate* CreateArticulationRoot(PxArticulationFlag::Enum
 	{
 		articulation->setArticulationFlag(flag, true);
 		//TODO make separate solver iteration counts for position and velocity
-		articulation->setSolverIterationCounts(solverIterationCount, solverIterationCount);
+		articulation->setSolverIterationCounts(solverIterationCount, solverIterationCount); //HACK
+		articulation->setArticulationFlag(PxArticulationFlag::eDRIVE_LIMITS_ARE_FORCES, true); //HACK
 	}
 	return articulation;
 }
@@ -699,7 +700,18 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
  PxArticulationLink* CreateArticulationLink(PxArticulationReducedCoordinate* articulation, PxArticulationLink* parentLink, PxwTransformData* pose)
  {
 	 PxArticulationLink* link = articulation->createLink(parentLink, pose->ToPxTransform());
-	 link->setMaxDepenetrationVelocity(300.0f);
+	 //JW HACK
+	 link->setMaxDepenetrationVelocity(1.0f);
+	 link->setMaxLinearVelocity(1000.0f);
+	 link->setMaxAngularVelocity(17.453f);
+	 link->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_GYROSCOPIC_FORCES, true);
+
+	 PxArticulationJointReducedCoordinate* joint = GetArticulationJoint(link);
+	 if (joint != nullptr)
+	 {
+		joint->setMaxJointVelocity(100.0f);
+	 }
+	 
 	 return link;
  }
 
@@ -764,7 +776,13 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
  {
 	joint->setDriveVelocity(axis, velocity);
  }
- 
+
+ //TODO expose
+ //void SetArticulationJointMaxVelocity(PxArticulationJointReducedCoordinate* joint, PxReal max_velocity)
+ //{
+	// joint->setMaxJointVelocity(max_velocity);
+ //}
+
 
  void ReleaseArticulation(PxArticulationReducedCoordinate* articulation)
  {
@@ -919,6 +937,31 @@ PxReal GetArticulationLinkMaxAngularVelocity(PxArticulationLink* link)
 	return link->getMaxAngularVelocity();
 }
 
+PxVec3 GetArticulationLinkLinearVelocity(PxArticulationLink* link)
+{
+	return link->getLinearVelocity();
+}
+
+PxVec3 GetArticulationLinkAngularVelocity(PxArticulationLink* link)
+{
+	return link->getAngularVelocity();
+}
+
+PxVec3 GetArticulationLinkCMassLocalPosition(PxArticulationLink* link)
+{
+	return link->getCMassLocalPose().p;
+}
+
+void SetArticulationRootLinearVelocity(PxArticulationReducedCoordinate* articulation, PxVec3* velocity, bool autowake)
+{
+	articulation->setRootLinearVelocity(*velocity, autowake);
+}
+
+void SetArticulationRootAngularVelocity(PxArticulationReducedCoordinate* articulation, PxVec3* velocity, bool autowake)
+{
+	articulation->setRootAngularVelocity(*velocity, autowake);
+}
+
 PxU32 GetArticulationLinkIndex(PxArticulationLink* link)
 {
 	return link->getLinkIndex();
@@ -1049,6 +1092,17 @@ void ApplyArticulationInternalStateCache(PxArticulationReducedCoordinate* articu
     articulation->applyCache(*cache, (PxArticulationCacheFlags)flags, true);
 
 	
+}
+
+void UpdateArticulationKinematic(PxArticulationReducedCoordinate* articulation, PxU32 flags)
+{
+    if (!articulation)
+    {
+        PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, __FILE__, __LINE__,
+            "UpdateArticulationKinematic: articulation pointer is NULL");
+        return;
+    }
+    articulation->updateKinematic(static_cast<PxArticulationKinematicFlags>(flags));
 }
 
 // Direct cache access functions
