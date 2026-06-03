@@ -3,7 +3,7 @@
 #include "PxPhysicsAPI.h"
 #include "DataInterop.h"
 #include <gpu/PxPhysicsGpu.h>
-#include "extensions/PxSoftBodyExt.h"
+#include "extensions/PxDeformableVolumeExt.h"
 #include "extensions/PxTetrahedronMeshExt.h"
 #include "geometry/PxGeometryQuery.h"
 #include <vector>
@@ -45,7 +45,7 @@ namespace pxw
 	{
 	protected:
 		PxScene* mScene;
-		PxSoftBody* mSoftBody;
+		PxDeformableVolume* mSoftBody;
 		PxTransform mTransform;
 		float mScale;
 		PxwFEMSoftBodyMeshData* mCollisionMeshData;
@@ -85,7 +85,7 @@ namespace pxw
 		{
 		}
 
-		void AttachSoftBodyToDevice(PxScene* scene, PxSoftBody* softBody, const PxFEMParameters& femParams, const PxTransform& transform,
+		void AttachSoftBodyToDevice(PxScene* scene, PxDeformableVolume* softBody, const PxFEMParameters& femParams, const PxTransform& transform,
 			const PxReal density, const PxReal scale, const PxU32 iterCount);
 
 		void AddToScene();
@@ -134,7 +134,10 @@ namespace pxw
 		void SyncCollisionVerticesDtoH()
 		{
 			PxTetrahedronMesh* tetMesh = mSoftBody->getCollisionMesh();
-			mCudaContextManager->getCudaContext()->memcpyDtoH(mCollisionMeshData->positionInvMass, reinterpret_cast<CUdeviceptr>(mSoftBody->getPositionInvMassBufferD()), tetMesh->getNbVertices() * sizeof(PxVec4));
+			mCudaContextManager->getCudaContext()->memcpyDtoH(
+				mCollisionMeshData->positionInvMass,
+				reinterpret_cast<CUdeviceptr>(mSoftBody->getPositionInvMassBufferD()),
+				tetMesh->getNbVertices() * sizeof(PxVec4));
 		}
 
 		PxwFEMSoftBodyMeshData GetCollisionMesh()

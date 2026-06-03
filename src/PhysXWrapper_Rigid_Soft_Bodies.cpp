@@ -31,19 +31,16 @@ namespace pxw
 	/*
 	* \brief Add an FEM soft body
 	*/
-	PxwSoftBodyHelper* PhysXWrapper::CreateFEMSoftBody(PxScene* scene, const PxU32 numVertices, const PxVec3* triVerts, const PxU32 numTriangles, const int* triIndices, PxwTransformData pose, PxFEMSoftBodyMaterial* material, PxReal density, PxU32 iterationCount, bool useCollisionMeshForSimulation, PxU32 numVoxelsAlongLongestAABBAxis)
+	PxwSoftBodyHelper* PhysXWrapper::CreateFEMSoftBody(PxScene* scene, const PxU32 numVertices, const PxVec3* triVerts, const PxU32 numTriangles, const int* triIndices, PxwTransformData pose, PxDeformableVolumeMaterial* material, PxReal density, PxU32 iterationCount, bool useCollisionMeshForSimulation, PxU32 numVoxelsAlongLongestAABBAxis)
 	{
 		PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "Add soft body\n");
 
 		PxTolerancesScale scale;
 		PxCookingParams params(scale);
 		SetupCommonCookingParams(params, false, false);
-		// FEM soft body must use GPU
 		params.buildGPUData = true;
 
-		PxSoftBodyMesh* softBodyMesh;
-
-		//PxU32 numVoxelsAlongLongestAABBAxis = 8;
+		PxDeformableVolumeMesh* softBodyMesh;
 
 		PxSimpleTriangleMesh surfaceMesh;
 		surfaceMesh.points.count = numVertices;
@@ -53,18 +50,18 @@ namespace pxw
 
 		if (useCollisionMeshForSimulation)
 		{
-			softBodyMesh = PxSoftBodyExt::createSoftBodyMeshNoVoxels(params, surfaceMesh, mPhysics->getPhysicsInsertionCallback());
+			softBodyMesh = PxDeformableVolumeExt::createDeformableVolumeMeshNoVoxels(params, surfaceMesh, mPhysics->getPhysicsInsertionCallback());
 		}
 		else
 		{
-			softBodyMesh = PxSoftBodyExt::createSoftBodyMesh(params, surfaceMesh, numVoxelsAlongLongestAABBAxis, mPhysics->getPhysicsInsertionCallback());
+			softBodyMesh = PxDeformableVolumeExt::createDeformableVolumeMesh(params, surfaceMesh, numVoxelsAlongLongestAABBAxis, mPhysics->getPhysicsInsertionCallback());
 		}
 
 		PX_ASSERT(softBodyMesh);
 
 		if (!mCudaContextManager)
 			return NULL;
-		PxSoftBody* softBody = mPhysics->createSoftBody(*mCudaContextManager);
+		PxDeformableVolume* softBody = mPhysics->createDeformableVolume(*mCudaContextManager);
 		PxwSoftBodyHelper* softBodyHelper = new PxwSoftBodyHelper(mCudaContextManager);
 
 		if (softBody)
@@ -77,11 +74,11 @@ namespace pxw
 				softBody->attachShape(*shape);
 				shape->release();
 			}
-			softBody->attachSimulationMesh(*softBodyMesh->getSimulationMesh(), *softBodyMesh->getSoftBodyAuxData());
+			softBody->attachSimulationMesh(*softBodyMesh->getSimulationMesh(), *softBodyMesh->getDeformableVolumeAuxData());
 
 			PxFEMParameters femParams;
 			softBodyHelper->AttachSoftBodyToDevice(scene, softBody, femParams, pose.ToPxTransform(), density, 1.0f, iterationCount);
-			softBody->setSoftBodyFlag(PxSoftBodyFlag::eDISABLE_SELF_COLLISION, false);
+			softBody->setDeformableBodyFlag(PxDeformableBodyFlag::eDISABLE_SELF_COLLISION, false);
 		}
 		PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "Add soft body done\n");
 		return softBodyHelper;

@@ -2,11 +2,12 @@ cmake_minimum_required(VERSION 3.10)
 
 project(PhysX5ForUnity)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Options
 OPTION(API_EXPORTS "Whether export or import the APIs." ON)
+OPTION(USE_GPU "Enable GPU support (requires CUDA toolkit and PhysXGpu library)." OFF)
 
 # Platform-agnostic hidden visibility settings
 set(CMAKE_C_VISIBILITY_PRESET hidden)
@@ -48,22 +49,42 @@ endif()
 if(PHYSX_BUILD_TYPE AND PHYSX_BUILD_TYPE STREQUAL "debug")
     message("Using PhysX debug version.")
 endif()
-link_directories(${PROJECT_SOURCE_DIR}/../PhysX/physx/bin/${PHYSX_PLATFORM_DIR}/${PHYSX_BUILD_TYPE}) # This is the path where PhysX libraries are installed
+link_directories(${PROJECT_SOURCE_DIR}/../PhysX/physx/bin/${PHYSX_PLATFORM_DIR}/${PHYSX_BUILD_TYPE})
 
 link_directories(/usr/lib/wsl/lib) # For WSL
+
+if(USE_GPU)
+    message(STATUS "GPU support ENABLED")
+    add_compile_definitions(USE_GPU)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        if(DEFINED ENV{CUDA_TOOLKIT_ROOT_DIR})
+            set(CUDA_TOOLKIT_ROOT_DIR $ENV{CUDA_TOOLKIT_ROOT_DIR})
+        elseif(NOT CUDA_TOOLKIT_ROOT_DIR)
+            set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda")
+        endif()
+        link_directories(${CUDA_TOOLKIT_ROOT_DIR}/lib64)
+    endif()
+else()
+    message(STATUS "GPU support DISABLED (CPU-only build)")
+endif()
 
 # Source files
 set(SOURCES
     src/PxwAPIs.cpp
     src/PhysXWrapper_Basics.cpp
-    src/PhysXWrapper_PBD.cpp
     src/PhysXWrapper_Rigid_Soft_Bodies.cpp
     src/PhysXWrapper_Robotics.cpp
     src/PhysXWrapper_Utils.cpp
-    src/ParticleSystemHelper.cpp
     src/Robotics.cpp
     src/SoftBodyHelper.cpp
 )
+
+if(USE_GPU)
+    list(APPEND SOURCES
+        src/PhysXWrapper_PBD.cpp
+        src/ParticleSystemHelper.cpp
+    )
+endif()
 
 add_library(PhysXUnity SHARED ${SOURCES})
 set(PhysXUnity LIBRARY_OUTPUT_DIRECTORY_DEBUG ${PROJECT_SOURCE_DIR}/build/bin/Debug)
@@ -85,24 +106,39 @@ endif()
 
 # Platform-specific linking
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(PhysXUnity PRIVATE
-        -Wl,--start-group
+    set(PHYSX_CORE_LIBS
         PhysX_static_64
         PhysXFoundation_static_64
         PhysXCommon_static_64
         PhysXCooking_static_64
         PhysXExtensions_static_64
         PhysXPvdSDK_static_64
-        PhysXGpu_64
-        -Wl,--end-group
-        cuda
-    )
-    set_target_properties(PhysXUnity PROPERTIES 
-        BUILD_RPATH "$ORIGIN:${CUDA_TOOLKIT_ROOT_DIR}/lib64"
     )
 
+    if(USE_GPU)
+        target_link_libraries(PhysXUnity PRIVATE
+            -Wl,--start-group
+            ${PHYSX_CORE_LIBS}
+            PhysXGpu_64
+            -Wl,--end-group
+            cuda
+        )
+        set_target_properties(PhysXUnity PROPERTIES
+            BUILD_RPATH "$ORIGIN:${CUDA_TOOLKIT_ROOT_DIR}/lib64"
+        )
+    else()
+        target_link_libraries(PhysXUnity PRIVATE
+            -Wl,--start-group
+            ${PHYSX_CORE_LIBS}
+            -Wl,--end-group
+        )
+        set_target_properties(PhysXUnity PROPERTIES
+            BUILD_RPATH "$ORIGIN"
+        )
+    endif()
+
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_link_libraries(PhysXUnity PRIVATE
+    set(PHYSX_CORE_LIBS
         PhysX_64
         PhysXFoundation_64
         PhysXCommon_64
@@ -110,6 +146,21 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         PhysXExtensions_static_64
         PhysXPvdSDK_static_64
     )
+
+    if(USE_GPU)
+        find_package(CUDAToolkit QUIET)
+        target_link_libraries(PhysXUnity PRIVATE
+            ${PHYSX_CORE_LIBS}
+            PhysXGpu_64
+        )
+        if(CUDAToolkit_FOUND)
+            target_link_libraries(PhysXUnity PRIVATE CUDA::cuda_driver)
+        endif()
+    else()
+        target_link_libraries(PhysXUnity PRIVATE
+            ${PHYSX_CORE_LIBS}
+        )
+    endif()
 endif()
 
 # Common properties for all platforms

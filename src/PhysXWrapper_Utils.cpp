@@ -262,7 +262,7 @@ namespace pxw
 				PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__, "Incorrect parameter number\n");
 				break;
 			}
-			return new PxConvexMeshGeometry(static_cast<PxConvexMesh*>(shapeRef), scale); // uses tighter bounds by default
+			return new PxConvexMeshGeometry(static_cast<PxConvexMesh*>(shapeRef), scale);
 		default:
 			PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__, "Geometry type not supported\n");
 			break;
@@ -288,10 +288,10 @@ namespace pxw
 	}
 
 
-	PxFEMSoftBodyMaterial* PhysXWrapper::CreateFEMSoftBodyMaterial(const float youngs, const float poissons, const float dynamicFriction, const float damping, const PxFEMSoftBodyMaterialModel::Enum model)
+	PxDeformableVolumeMaterial* PhysXWrapper::CreateFEMSoftBodyMaterial(const float youngs, const float poissons, const float dynamicFriction, const float damping, const PxDeformableVolumeMaterialModel::Enum model)
 	{
-		PxFEMSoftBodyMaterial* material = mPhysics->createFEMSoftBodyMaterial(youngs, poissons, dynamicFriction);
-		material->setDamping(damping);
+		PxDeformableVolumeMaterial* material = mPhysics->createDeformableVolumeMaterial(youngs, poissons, dynamicFriction);
+		material->setElasticityDamping(damping);
 		material->setMaterialModel(model);
 		return material;
 	}

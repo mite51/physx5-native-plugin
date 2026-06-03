@@ -43,10 +43,10 @@ namespace pxw
 
 			mDispatcher = PxDefaultCpuDispatcherCreate(2);
 
+#ifdef USE_GPU
 			// Init CUDA
 			if (PxGetSuggestedCudaDeviceOrdinal(mFoundation->getErrorCallback()) >= 0)
 			{
-				// initialize CUDA
 				PxCudaContextManagerDesc cudaContextManagerDesc;
 				mCudaContextManager = PxCreateCudaContextManager(*mFoundation, cudaContextManagerDesc, PxGetProfilerCallback());
 				if (mCudaContextManager && !mCudaContextManager->contextIsValid())
@@ -59,6 +59,9 @@ namespace pxw
 			{
 				PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, "Failed to initialize CUDA!\n");
 			}
+#else
+			PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "GPU support disabled (CPU-only build).\n");
+#endif
 
 			mDefaultMaterial = mPhysics->createMaterial(0.5f, 0.5f, 0.0f);
 		}
@@ -98,12 +101,13 @@ namespace pxw
 		sceneDesc.cudaContextManager = mCudaContextManager;
 		sceneDesc.staticStructure = pruningStructureType;
 		sceneDesc.flags |= PxSceneFlag::eENABLE_PCM;
-		sceneDesc.flags |= PxSceneFlag::eENABLE_ACTIVE_ACTORS;// eENABLE_CCD; //HACK
+		//sceneDesc.flags |= PxSceneFlag::eENABLE_CCD;
 		
 		if (useGpu)
 		{
 			// enable GPU dynamics and collision
 			sceneDesc.flags |= PxSceneFlag::eENABLE_GPU_DYNAMICS;
+			sceneDesc.flags |= PxSceneFlag::eENABLE_DIRECT_GPU_API;
 			sceneDesc.broadPhaseType = PxBroadPhaseType::eGPU;
 		}
 		else
@@ -113,7 +117,7 @@ namespace pxw
 
 		sceneDesc.solverType = solverType;
 		sceneDesc.filterShader = PxDefaultSimulationFilterShader;
-		sceneDesc.bounceThresholdVelocity = 0.000001f;
+		sceneDesc.bounceThresholdVelocity = 0.2f;
 
 		std::string message = "creating client! solver type: " + to_string((int)solverType) + " useGpu: " + to_string(useGpu) + "\n";
 		PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, message.c_str());
@@ -250,6 +254,25 @@ namespace pxw
 		PX_RELEASE(mPhysics);
 		PX_RELEASE(mFoundation);
 		mIsPhysXInitialized = false;
+	}
+
+	void PhysXWrapper::FlushPVD()
+	{
+		/*
+		for (PxArray<PxScene*>::ConstIterator it = mScenes.begin(); it != mScenes.end(); ++it)
+		{
+			PxPvdSceneClient* pvdClient = (*it)->getScenePvdClient();
+			if (pvdClient)
+			{
+				pvdClient->updatePvdProperties();
+			}
+		}
+		*/
+
+		if (mTransport)
+		{
+			mTransport->flush();
+		}
 	}
 
 	void PhysXWrapper::AddActorToScene(PxScene* scene, PxActor* actor)

@@ -3,15 +3,18 @@
 #include <utility>
 #include <limits.h>
 #include "PxPhysicsAPI.h"
-//#include "pvd/PxPvd.h"
 #include "extensions/PxParticleExt.h"
 #include <list>
 #include <sstream>
+#include "extensions/PxDeformableVolumeExt.h"
+
+#ifdef USE_GPU
 #include "cudamanager/PxCudaContext.h"
 #include <gpu/PxPhysicsGpu.h>
 #include <PxAnisotropy.h>
-
 #include "ParticleSystemHelper.h"
+#endif
+
 #include "SoftBodyHelper.h"
 #include "Robotics.h"
 
@@ -19,7 +22,9 @@
 #include <sstream>
 
 using namespace physx;
+#ifdef USE_GPU
 using namespace ExtGpu;
+#endif
 using namespace std;
 
 namespace pxw {
@@ -98,6 +103,8 @@ namespace pxw {
 
 		void CleanupPhysX();
 
+		void FlushPVD();
+
 		// PxActor basics
 
 		void AddActorToScene(PxScene* scene, PxActor* actor);
@@ -106,7 +113,8 @@ namespace pxw {
 
 		PxShape* CreateShape(PxGeometry* geometry, PxMaterial* material, bool isExclusive);
 
-		// Particle system
+#ifdef USE_GPU
+		// Particle system (GPU only)
 		PxwPBDParticleSystemHelper* CreatePBDParticleSystem(PxScene* scene, const PxReal particleSpacing = 0.2f, int maxNumParticlesForAnisotropy = 0);
 
 		void ReleasePBDParticleSystem(PxScene* scene, PxPBDParticleSystem* particleSystem);
@@ -152,6 +160,7 @@ namespace pxw {
 			const PxReal pressure,
 			const PxReal particleSpacing = 0.2f
 		);
+#endif
 
 		// Rigid and Soft Bodies
 
@@ -161,7 +170,7 @@ namespace pxw {
 
 		PxActor* CreateStaticRigidActor(PxScene* scene, const PxwTransformData transform, PxShape* shape);
 
-		PxwSoftBodyHelper* CreateFEMSoftBody(PxScene* scene, const PxU32 numVertices, const PxVec3* triVerts, const PxU32 numTriangles, const int* triIndices, PxwTransformData pose, PxFEMSoftBodyMaterial* material, PxReal density, PxU32 iterationCount, bool useCollisionMeshForSimulation = false, PxU32 numVoxelsAlongLongestAABBAxis = 8);
+		PxwSoftBodyHelper* CreateFEMSoftBody(PxScene* scene, const PxU32 numVertices, const PxVec3* triVerts, const PxU32 numTriangles, const int* triIndices, PxwTransformData pose, PxDeformableVolumeMaterial* material, PxReal density, PxU32 iterationCount, bool useCollisionMeshForSimulation = false, PxU32 numVoxelsAlongLongestAABBAxis = 8);
 
 		// Robotics
 		PxwArticulationKinematicTree* CreatePxArticulationKinematicTree(PxScene* scene, bool fixBase, bool disableSelfCollision);
@@ -197,7 +206,7 @@ namespace pxw {
 		PxPBDMaterial* CreatePBDMaterial(const float friction, const float damping, const float adhesion, const float viscosity, const float vorticityConfinement,
 			const float surfaceTension, const float cohesion, const float lift, const float drag, const float cflCoefficient, const float gravityScale);
 
-		PxFEMSoftBodyMaterial* CreateFEMSoftBodyMaterial(const float youngs, const float poissons, const float dynamicFriction, const float damping, const PxFEMSoftBodyMaterialModel::Enum model = PxFEMSoftBodyMaterialModel::eCO_ROTATIONAL);
+		PxDeformableVolumeMaterial* CreateFEMSoftBodyMaterial(const float youngs, const float poissons, const float dynamicFriction, const float damping, const PxDeformableVolumeMaterialModel::Enum model = PxDeformableVolumeMaterialModel::eCO_ROTATIONAL);
 
 		// Add this new method
 		std::string GetAndClearErrors() {

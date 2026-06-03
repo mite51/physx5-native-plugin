@@ -42,6 +42,11 @@ void ReleasePhysX() {
 	gPhysXWrapper.CleanupPhysX();
 }
 
+void FlushPVD()
+{
+	gPhysXWrapper.FlushPVD();
+}
+
 void ReleaseActor(PxActor* actor)
 {
 	actor->release();
@@ -92,6 +97,7 @@ void RemoveSoftActorFromScene(PxwSoftBodyHelper* softBodyHelper)
 	softBodyHelper->RemoveFromScene();
 }
 
+#ifdef USE_GPU
 void AddPBDParticleSystemToScene(PxwPBDParticleSystemHelper* particleSystemHelper)
 {
 	particleSystemHelper->AddToScene();
@@ -111,6 +117,7 @@ void RemovePBDObjectFromParticleSystem(PxwParticleSystemObject* particleSystemOb
 {
 	particleSystemObject->RemoveFromParticleSystem();
 }
+#endif
 
 void AddArticulationToScene(PxwArticulationKinematicTree* articulation)
 {
@@ -122,7 +129,8 @@ void RemoveArticulationFromScene(PxwArticulationKinematicTree* articulation)
 	articulation->RemoveFromScene();
 }
 
-// Particle system
+#ifdef USE_GPU
+// Particle system (GPU only)
 
 PxwPBDParticleSystemHelper* CreatePBDParticleSystem(PxScene* scene, PxReal particleSpacing, int maxNumParticlesForAnisotropy)
 {
@@ -252,6 +260,7 @@ void ReleaseParticleSystemObject(PxwParticleSystemObject* object)
 	object->Release();
 	delete object;
 }
+#endif // USE_GPU
 
 // Rigid and soft bodies
 
@@ -505,7 +514,8 @@ void DeletePxGeometry(PxGeometry* geometry)
 
 PxMaterial* CreatePxMaterial(const float staticFriction, const float dynamicFriction, const float restitution)
 {
-	return gPhysXWrapper.CreateMaterial(staticFriction, dynamicFriction, restitution);
+	PxMaterial* material = gPhysXWrapper.CreateMaterial(staticFriction, dynamicFriction, restitution);
+	return material;
 }
 
 PxFEMSoftBodyMaterial* CreatePxFEMSoftBodyMaterial(const float youngs, const float poissons, const float dynamicFriction, const float damping, const PxFEMSoftBodyMaterialModel::Enum model)
@@ -682,6 +692,7 @@ PxArticulationReducedCoordinate* CreateArticulationRoot(PxArticulationFlag::Enum
 		//TODO make separate solver iteration counts for position and velocity
 		articulation->setSolverIterationCounts(solverIterationCount, solverIterationCount); //HACK
 		articulation->setArticulationFlag(PxArticulationFlag::eDRIVE_LIMITS_ARE_FORCES, true); //HACK
+		articulation->setWakeCounter(0.216666f);
 	}
 	return articulation;
 }
@@ -709,7 +720,14 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
 	 PxArticulationJointReducedCoordinate* joint = GetArticulationJoint(link);
 	 if (joint != nullptr)
 	 {
+		joint->setFrictionCoefficient(0.0f);
 		joint->setMaxJointVelocity(100.0f);
+		joint->setMaxJointVelocity(PxArticulationAxis::eSWING1, 100.0f);
+		joint->setMaxJointVelocity(PxArticulationAxis::eSWING2, 100.0f);
+		joint->setMaxJointVelocity(PxArticulationAxis::eTWIST, 100.0f);
+		joint->setMaxJointVelocity(PxArticulationAxis::eX, 100.0f);
+		joint->setMaxJointVelocity(PxArticulationAxis::eY, 100.0f);
+		joint->setMaxJointVelocity(PxArticulationAxis::eZ, 100.0f);
 	 }
 	 
 	 return link;
@@ -832,16 +850,6 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
  void PutArticulationToSleep(PxArticulationReducedCoordinate* articulation)
  {
 	articulation->putToSleep();
- }
-
- void SetArticulationMaxCOMLinearVelocity(PxArticulationReducedCoordinate* articulation, PxReal maxLinearVelocity)
- {
-	articulation->setMaxCOMLinearVelocity(maxLinearVelocity);
- }
-
- void SetArticulationMaxCOMAngularVelocity(PxArticulationReducedCoordinate* articulation, PxReal maxAngularVelocity)
- {
-	articulation->setMaxCOMAngularVelocity(maxAngularVelocity);
  }
 
  PxArticulationCache* CreateArticulationCache(PxArticulationReducedCoordinate* articulation)

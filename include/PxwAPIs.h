@@ -43,6 +43,8 @@ extern "C" {
 
     PHYSX_WRAPPER_API void ReleaseActor(PxActor* actor);
 
+    PHYSX_WRAPPER_API void FlushPVD();
+
     // Actor basics
 
     PHYSX_WRAPPER_API void AddActorToScene(PxScene* scene, PxActor* actor);
@@ -63,6 +65,7 @@ extern "C" {
 
     PHYSX_WRAPPER_API void RemoveSoftActorFromScene(PxwSoftBodyHelper* softBodyHelper);
     
+#ifdef USE_GPU
     PHYSX_WRAPPER_API void AddPBDParticleSystemToScene(PxwPBDParticleSystemHelper* particleSystemHelper);
 
     PHYSX_WRAPPER_API void RemovePBDParticleSystemFromScene(PxwPBDParticleSystemHelper* particleSystemHelper);
@@ -70,12 +73,14 @@ extern "C" {
     PHYSX_WRAPPER_API void AddPBDObjectToParticleSystem(PxwParticleSystemObject* particleSystemObject);
 
     PHYSX_WRAPPER_API void RemovePBDObjectFromParticleSystem(PxwParticleSystemObject* particleSystemObject);
+#endif
 
     PHYSX_WRAPPER_API void AddArticulationToScene(PxwArticulationKinematicTree* articulation);
 
     PHYSX_WRAPPER_API void RemoveArticulationFromScene(PxwArticulationKinematicTree* articulation);
 
-    // Particle system
+#ifdef USE_GPU
+    // Particle system (GPU only)
 
     PHYSX_WRAPPER_API PxwPBDParticleSystemHelper* CreatePBDParticleSystem(PxScene* scene, PxReal particleSpacing, int maxNumParticlesForAnisotropy);
 
@@ -147,6 +152,7 @@ extern "C" {
     PHYSX_WRAPPER_API void RemoveParticleRigidFilter(PxwParticleSystemObject* particleObject, PxRigidActor* rigidActor, int particleIndex);
 
     PHYSX_WRAPPER_API void ReleaseParticleSystemObject(PxwParticleSystemObject* object);
+#endif
 
     // Rigid and soft bodies
 

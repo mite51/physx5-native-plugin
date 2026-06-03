@@ -3,20 +3,20 @@
 
 namespace pxw
 {
-	void PxwSoftBodyHelper::AttachSoftBodyToDevice(PxScene* scene, PxSoftBody* softBody, const PxFEMParameters& femParams, const PxTransform& transform, const PxReal density, const PxReal scale, const PxU32 iterCount)
+	void PxwSoftBodyHelper::AttachSoftBodyToDevice(PxScene* scene, PxDeformableVolume* softBody, const PxFEMParameters& femParams, const PxTransform& transform, const PxReal density, const PxReal scale, const PxU32 iterCount)
 	{
 		mScene = scene;
 
-		PxSoftBodyExt::allocateAndInitializeHostMirror(*softBody, mCudaContextManager, mInitialSimPositionInvMassPinned, mInitialSimVelocityPinned, mInitialCollPositionInvMassPinned, mInitialRestPositionPinned);
+		PxDeformableVolumeExt::allocateAndInitializeHostMirror(*softBody, mCudaContextManager, mInitialSimPositionInvMassPinned, mInitialSimVelocityPinned, mInitialCollPositionInvMassPinned, mInitialRestPositionPinned);
 
 		const PxReal maxInvMassRatio = 50.f;
 
 		softBody->setParameter(femParams);
 		softBody->setSolverIterationCounts(iterCount);
 
-		PxSoftBodyExt::transform(*softBody, transform, scale, mInitialSimPositionInvMassPinned, mInitialSimVelocityPinned, mInitialCollPositionInvMassPinned, mInitialRestPositionPinned);
-		PxSoftBodyExt::updateMass(*softBody, density, maxInvMassRatio, mInitialSimPositionInvMassPinned);
-		PxSoftBodyExt::copyToDevice(*softBody, PxSoftBodyDataFlag::eALL, mInitialSimPositionInvMassPinned, mInitialSimVelocityPinned, mInitialCollPositionInvMassPinned, mInitialRestPositionPinned);
+		PxDeformableVolumeExt::transform(*softBody, transform, scale, mInitialSimPositionInvMassPinned, mInitialSimVelocityPinned, mInitialCollPositionInvMassPinned, mInitialRestPositionPinned);
+		PxDeformableVolumeExt::updateMass(*softBody, density, maxInvMassRatio, mInitialSimPositionInvMassPinned);
+		PxDeformableVolumeExt::copyToDevice(*softBody, PxDeformableVolumeDataFlag::eALL, mInitialSimPositionInvMassPinned, mInitialSimVelocityPinned, mInitialCollPositionInvMassPinned, mInitialRestPositionPinned);
 
 		mSoftBody = softBody;
 		mTransform = transform;
@@ -25,7 +25,6 @@ namespace pxw
 		mCollisionMeshData->numVertices = softBody->getCollisionMesh()->getNbVertices();
 		mCollisionMeshData->positionInvMass = PX_PINNED_HOST_ALLOC_T(physx::PxVec4, mCudaContextManager, softBody->getCollisionMesh()->getNbVertices());
 
-		// Update the device buffer
 		SyncCollisionVerticesDtoH();
 	}
 
@@ -198,8 +197,8 @@ namespace pxw
 		for (int i = 0; i < tetAttached0.size(); i++)
 		{
 			// TODO: this is an ugly hack to basically diable collision between tetAttached0 and the other complete soft body
-			mSoftBody->addSoftBodyFilter(otherSoftBodyHelper->mSoftBody, PX_MAX_TETID, tetAttached0[i]);
-			PxwSoftBodyFilterTriple filter = PxwSoftBodyFilterTriple(otherSoftBodyHelper, PX_MAX_TETID, tetAttached0[i]);
+			mSoftBody->addSoftBodyFilter(otherSoftBodyHelper->mSoftBody, PX_MAX_NB_DEFORMABLE_VOLUME_TET, tetAttached0[i]);
+			PxwSoftBodyFilterTriple filter = PxwSoftBodyFilterTriple(otherSoftBodyHelper, PX_MAX_NB_DEFORMABLE_VOLUME_TET, tetAttached0[i]);
 			mSoftBodyFilters.pushBack(filter);
 			otherSoftBodyHelper->mSoftBodyFiltersToThis.pushBack(PxPair<PxwSoftBodyHelper*, PxwSoftBodyFilterTriple>(this, filter));
 		}
@@ -311,7 +310,7 @@ namespace pxw
 	{
 		if (mInitialSimPositionInvMassPinned)
 		{
-			PxSoftBodyExt::copyToDevice(*mSoftBody, PxSoftBodyDataFlag::eALL, mInitialSimPositionInvMassPinned, mInitialSimVelocityPinned, mInitialCollPositionInvMassPinned, mInitialRestPositionPinned);
+			PxDeformableVolumeExt::copyToDevice(*mSoftBody, PxDeformableVolumeDataFlag::eALL, mInitialSimPositionInvMassPinned, mInitialSimVelocityPinned, mInitialCollPositionInvMassPinned, mInitialRestPositionPinned);
 			SyncCollisionVerticesDtoH();
 		}
 	}
