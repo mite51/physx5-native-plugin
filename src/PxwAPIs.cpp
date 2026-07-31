@@ -691,7 +691,7 @@ PxArticulationReducedCoordinate* CreateArticulationRoot(PxArticulationFlag::Enum
 		articulation->setArticulationFlag(flag, true);
 		//TODO make separate solver iteration counts for position and velocity
 		articulation->setSolverIterationCounts(solverIterationCount, solverIterationCount); //HACK
-		articulation->setArticulationFlag(PxArticulationFlag::eDRIVE_LIMITS_ARE_FORCES, true); //HACK
+		//articulation->setArticulationFlag(PxArticulationFlag::eDRIVE_LIMITS_ARE_FORCES, true); //HACK
 		articulation->setWakeCounter(0.216666f);
 	}
 	return articulation;

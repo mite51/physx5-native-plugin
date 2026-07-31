@@ -41,7 +41,13 @@ namespace pxw
 			// Initialize extensions (important for PVD)
 			PxInitExtensions(*mPhysics, mPvd);
 
-			mDispatcher = PxDefaultCpuDispatcherCreate(2);
+			// 0 worker threads -> solver/contact tasks run on the calling (Unity main)
+			// thread, matching OVProtomotionsCpp (PxDefaultCpuDispatcherCreate(0)).
+			// PhysX results are only reproducible for a fixed thread count: with >1
+			// worker the constraint partitioning and floating-point reduction order
+			// change, which perturbs the contact impulse at stiff footstrike contacts
+			// (instantaneous ankle/toe dof.vel kicks) even though positions barely move.
+			mDispatcher = PxDefaultCpuDispatcherCreate(0);
 
 #ifdef USE_GPU
 			// Init CUDA

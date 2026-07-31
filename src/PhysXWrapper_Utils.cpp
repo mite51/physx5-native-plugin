@@ -263,6 +263,8 @@ namespace pxw
 				break;
 			}
 			return new PxConvexMeshGeometry(static_cast<PxConvexMesh*>(shapeRef), scale);
+		case PxGeometryType::ePLANE:
+			return new PxPlaneGeometry();
 		default:
 			PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__, "Geometry type not supported\n");
 			break;
