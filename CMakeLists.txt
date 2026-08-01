@@ -73,10 +73,14 @@ set(SOURCES
     src/PxwAPIs.cpp
     src/PhysXWrapper_Basics.cpp
     src/PhysXWrapper_Rigid_Soft_Bodies.cpp
-    src/PhysXWrapper_Robotics.cpp
     src/PhysXWrapper_Utils.cpp
-    src/Robotics.cpp
+    src/PhysXWrapper_Vehicle.cpp
     src/SoftBodyHelper.cpp
+    src/VehicleHelper.cpp
+    src/vehicle/VehicleBase.cpp
+    src/vehicle/VehiclePhysXIntegration.cpp
+    src/vehicle/VehicleDirectDrive.cpp
+    src/vehicle/VehicleEngineDrive.cpp
 )
 
 if(USE_GPU)
@@ -112,6 +116,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         PhysXCommon_static_64
         PhysXCooking_static_64
         PhysXExtensions_static_64
+        PhysXVehicle2_static_64
         PhysXPvdSDK_static_64
     )
 
@@ -144,6 +149,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         PhysXCommon_64
         PhysXCooking_64
         PhysXExtensions_static_64
+        PhysXVehicle2_static_64
         PhysXPvdSDK_static_64
     )
 

@@ -1,4 +1,5 @@
 #include "PhysXWrapper.h"
+#include "VehicleModule.h"
 
 #define PVD_HOST "127.0.0.1"	//Set this to the IP address of the system running the PhysX Visual Debugger that you want to connect to.
 
@@ -70,6 +71,9 @@ namespace pxw
 #endif
 
 			mDefaultMaterial = mPhysics->createMaterial(0.5f, 0.5f, 0.0f);
+
+			// Initialise the PhysX Vehicle2 extension and shared sweep mesh.
+			VehicleInit(mFoundation, mPhysics);
 		}
 	}
 
@@ -143,6 +147,10 @@ namespace pxw
 		}		
 
 		mScenes.pushBack(scene);
+
+		// Register a per-scene vehicle simulation context.
+		VehicleRegisterScene(scene);
+
 		return scene; // Return the scene
 	}
 
@@ -153,6 +161,7 @@ namespace pxw
 			if (mStep)
 			{
 				for (PxArray<PxScene*>::ConstIterator it = mScenes.begin(); it != mScenes.end(); ++it) {
+					VehicleStepScene(*it, dt);
 					(*it)->simulate(dt);
 				}
 			}
@@ -179,6 +188,7 @@ namespace pxw
 			mStep = false;
 
 			for (PxArray<PxScene*>::ConstIterator it = mScenes.begin(); it != mScenes.end(); ++it) {
+				VehicleStepScene(*it, dt);
 				(*it)->simulate(dt);
 			}
 
@@ -207,6 +217,7 @@ namespace pxw
 		if (mIsRunning && mStep)
 		{
 			mStep = false;
+			VehicleStepScene(scene, dt);
 			scene->simulate(dt);
 			scene->fetchResults(true);
 			scene->fetchResultsParticleSystem();
@@ -216,6 +227,9 @@ namespace pxw
 
 	void PhysXWrapper::ReleaseScene(PxScene* scene)
 	{
+		// Drop the per-scene vehicle context before releasing the scene.
+		VehicleUnregisterScene(scene);
+
 		if (mScenes.size() > 1)
 		{
 			mScenes.findAndReplaceWithLast(scene);
@@ -254,6 +268,9 @@ namespace pxw
 			(*it)->release();
 		}
 		mScenes.reset();
+
+		// Tear down the vehicle extension before core extensions/physics.
+		VehicleCleanup();
 
 		PX_RELEASE(mDispatcher);
 		PxCloseExtensions();

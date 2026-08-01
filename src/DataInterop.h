@@ -1,6 +1,5 @@
 #pragma once
 #include "PxPhysicsAPI.h"
-#include "Eigen/Dense"
 
 using namespace physx;
 
@@ -34,23 +33,6 @@ namespace pxw
 			return PxTransform(position, quaternion);
 		}
 
-		Eigen::Matrix4f ToEigenMatrix4() const
-		{
-			// Directly compute the rotation matrix elements from the quaternion
-			float qx = quaternion.x;
-			float qy = quaternion.y;
-			float qz = quaternion.z;
-			float qw = quaternion.w;
-
-			Eigen::Matrix4f transformationMatrix;
-			transformationMatrix << 1 - 2 * qy * qy - 2 * qz * qz, 2 * qx * qy - 2 * qz * qw, 2 * qx * qz + 2 * qy * qw, position.x,
-									2 * qx * qy + 2 * qz * qw, 1 - 2 * qx * qx - 2 * qz * qz, 2 * qy * qz - 2 * qx * qw, position.y,
-									2 * qx * qz - 2 * qy * qw, 2 * qy * qz + 2 * qx * qw, 1 - 2 * qx * qx - 2 * qy * qy, position.z,
-									0, 0, 0, 1;
-
-			return transformationMatrix;
-		}
-
 	};
 
 	struct PxwParticleData
@@ -79,36 +61,5 @@ namespace pxw
 		int numVertices;
 		PxVec4* positionInvMass;
 		PxVec3* velocity;
-	};
-
-	struct PxwSpatialForceData
-	{
-		PxVec3 force;
-		PxVec3 torque;
-	};
-
-	struct PxwRobotJointType
-	{
-		enum Enum
-		{
-			eFIX = 0,
-			ePRISMATIC = 1,
-			eREVOLUTE = 2,
-			eSPHERICAL = 4, // TODO : implement
-
-		};
-
-		// Convert to PxArticulationJointType::Enum
-		static PxArticulationJointType::Enum ToPxArticulationJointType(Enum e)
-		{
-			switch (e)
-			{
-			case eFIX: return PxArticulationJointType::eFIX;
-			case ePRISMATIC: return PxArticulationJointType::ePRISMATIC;
-			case eREVOLUTE: return PxArticulationJointType::eREVOLUTE;
-			case eSPHERICAL: return PxArticulationJointType::eSPHERICAL;// TODO : implement
-			default: return PxArticulationJointType::eUNDEFINED;
-			}
-		}
 	};
 }

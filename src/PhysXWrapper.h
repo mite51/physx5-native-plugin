@@ -16,7 +16,6 @@
 #endif
 
 #include "SoftBodyHelper.h"
-#include "Robotics.h"
 
 #include <mutex>
 #include <sstream>
@@ -171,11 +170,6 @@ namespace pxw {
 		PxActor* CreateStaticRigidActor(PxScene* scene, const PxwTransformData transform, PxShape* shape);
 
 		PxwSoftBodyHelper* CreateFEMSoftBody(PxScene* scene, const PxU32 numVertices, const PxVec3* triVerts, const PxU32 numTriangles, const int* triIndices, PxwTransformData pose, PxDeformableVolumeMaterial* material, PxReal density, PxU32 iterationCount, bool useCollisionMeshForSimulation = false, PxU32 numVoxelsAlongLongestAABBAxis = 8);
-
-		// Robotics
-		PxwArticulationKinematicTree* CreatePxArticulationKinematicTree(PxScene* scene, bool fixBase, bool disableSelfCollision);
-
-		PxwArticulationRobot* CreateArticulationRobot(PxScene* scene, PxwTransformData basePose, float density);
 
 		// Utility functions
 

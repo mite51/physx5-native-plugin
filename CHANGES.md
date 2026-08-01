@@ -1,6 +1,30 @@
-# PhysX 5.6.1 Upgrade - Changes
+# Native Plugin - Changes
 
-This document describes changes made to the native plugin when upgrading from PhysX 5.4.2 to 5.6.1.
+This document describes changes made to the native plugin: first the PhysX 5.6.1 upgrade, then the robot-removal / vehicle-support refactor.
+
+## Robot Removal + Vehicle Support Refactor
+
+### Legacy robot layer removed
+
+- Deleted `src/Robotics.{h,cpp}` and `src/PhysXWrapper_Robotics.cpp`, and the entire vendored `src/Eigen/` tree (Eigen was only used by the robot FK/IK code).
+- Removed the `Pxw*Robot` / `PxwArticulationKinematicTree` exports from `include/PxwAPIs.h` / `src/PxwAPIs.cpp`, the `#include "Robotics.h"` and factory declarations from `PhysXWrapper.h`, and the `ToEigenMatrix4()` / `PxwSpatialForceData` / `PxwRobotJointType` definitions from `DataInterop.h`.
+- `RemoveArticulationFromScene` now takes a raw `PxArticulationReducedCoordinate*` (matching what the retained `PhysxArticulationBody` uses); the unused `AddArticulationToScene` was dropped.
+- The low-level `PxArticulationReducedCoordinate` API (~60 exports) is untouched.
+
+### PhysX Vehicle2 support added
+
+- Vendored and adapted the NVIDIA vehicle common snippets into `src/vehicle/` under namespace `pxw`: `VehicleBase`, `VehiclePhysXIntegration`, `VehicleDirectDrive`, `VehicleEngineDrive`. `PhysXActorVehicle::initialize` was extended to accept an optional chassis `PxGeometry*`, and `DirectDriveVehicle` gained a `mUseDirectWheelControl` flag that omits the command-response component for raw per-wheel control.
+- Added blittable descriptors in `src/VehicleInterop.h`, the `PxwVehicle` opaque handle in `src/VehicleHelper.{h,cpp}`, and per-scene management in `src/VehicleModule.h` / `src/PhysXWrapper_Vehicle.cpp`.
+- Wired `PxInitVehicleExtension` / `PxCloseVehicleExtension` and per-scene register/unregister into `PhysXWrapper_Basics.cpp`, stepping registered vehicles before each `PxScene::simulate()`.
+- Added the vehicle C exports (lifecycle, per-part setup, commands, raw per-wheel control including `SetVehicleUseDirectWheelControl` / `SetVehicleDirectDriveThrottleParams`, and state readback) to `include/PxwAPIs.h` / `src/PxwAPIs.cpp`.
+- `CMakeLists.txt`: dropped the removed robot sources, added the new vehicle sources, and linked `PhysXVehicle2_static_64`.
+- `src/PhysXWrapper_Utils.cpp`: added an explicit `#include <unordered_map>` (previously pulled in transitively via Eigen).
+
+---
+
+## PhysX 5.6.1 Upgrade
+
+This section describes changes made to the native plugin when upgrading from PhysX 5.4.2 to 5.6.1.
 
 ## Unity-Side Impact
 

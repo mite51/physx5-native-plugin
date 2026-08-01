@@ -1,5 +1,7 @@
 #include "PhysXWrapper.h"
 
+#include <unordered_map>
+
 using namespace pxw;
 
 namespace pxw

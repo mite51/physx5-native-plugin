@@ -2,6 +2,7 @@
 
 #include "PxPhysicsAPI.h"
 #include "PhysXWrapper.h"
+#include "VehicleInterop.h"
 
 // Macro to export our functions
 #ifdef _WIN32
@@ -20,6 +21,8 @@
 
 using namespace physx;
 using namespace pxw;
+
+namespace pxw { class PxwVehicle; }
 
 extern "C" {
 
@@ -75,9 +78,7 @@ extern "C" {
     PHYSX_WRAPPER_API void RemovePBDObjectFromParticleSystem(PxwParticleSystemObject* particleSystemObject);
 #endif
 
-    PHYSX_WRAPPER_API void AddArticulationToScene(PxwArticulationKinematicTree* articulation);
-
-    PHYSX_WRAPPER_API void RemoveArticulationFromScene(PxwArticulationKinematicTree* articulation);
+    PHYSX_WRAPPER_API void RemoveArticulationFromScene(PxArticulationReducedCoordinate* articulation);
 
 #ifdef USE_GPU
     // Particle system (GPU only)
@@ -340,92 +341,6 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxU32 GetArticulationDofs(PxArticulationReducedCoordinate* articulation);
 
-    // Robotics
-
-    PHYSX_WRAPPER_API PxwArticulationKinematicTree* CreateArticulationKinematicTree(PxScene* scene, bool fixBase, bool disableSelfCollision);
-
-    PHYSX_WRAPPER_API PxArticulationLink* CreateArticulationKinematicTreeBase(PxwArticulationKinematicTree* kinematicTree, PxwTransformData* basePose, PxShape* shape, float density);
-
-    PHYSX_WRAPPER_API PxArticulationLink* AddLinkToArticulationKinematicTree(
-        PxwArticulationKinematicTree* kinematicTree,
-        PxArticulationLink* parentLink,
-        PxwTransformData* linkPose,
-        PxwRobotJointType::Enum type,
-        PxwTransformData* jointPoseParent,
-        PxwTransformData* jointPoseChild,
-        PxArticulationAxis::Enum dofAxis,
-        PxShape* shape,
-        float jointLimLower,
-        float jointLimUpper,
-        bool isDriveJoint,
-        float stiffness,
-        float damping,
-        float driveMaxForce,
-        float density
-    );
-
-    PHYSX_WRAPPER_API void ResetArticulationKinematicTree(PxwArticulationKinematicTree* kinematicTree);
-
-    PHYSX_WRAPPER_API void DriveArticulationKinematicTreeJoints(PxwArticulationKinematicTree* kinematicTree, float* targetJointPositions);
-
-    PHYSX_WRAPPER_API void ReleaseArticulationKinematicTree(PxwArticulationKinematicTree* kinematicTree);
-
-    PHYSX_WRAPPER_API void GetArticulationKinematicTreeJointPositions(PxwArticulationKinematicTree* kinematicTree, void* destArray, int length);
-
-    PHYSX_WRAPPER_API void GetArticulationKinematicTreeLinkPoses(PxwArticulationKinematicTree* kinematicTree, void* destArray, int length);
-
-    PHYSX_WRAPPER_API PxwArticulationRobot* CreateArticulationRobot(PxScene* scene, PxwTransformData* pose, float density);
-
-    PHYSX_WRAPPER_API PxArticulationLink* AddLinkToRobot(
-        PxwArticulationRobot* robot,
-        PxwTransformData* linkPose,
-        PxwRobotJointType::Enum type,
-        PxwTransformData* jointPoseParent,
-        PxwTransformData* jointPoseChild,
-        PxShape* shape,
-        float jointLimLower,
-        float jointLimUpper,
-        float stiffness,
-        float damping,
-        float driveMaxForce,
-        float density
-    );
-
-    PHYSX_WRAPPER_API PxArticulationLink* AddEndEffectorLinkToRobot(
-        PxwArticulationRobot* robot,
-        PxwTransformData* linkPose,
-        PxwRobotJointType::Enum type,
-        PxwTransformData* jointPoseParent,
-        PxwTransformData* jointPoseChild,
-        PxShape* shape,
-        float jointLimLower,
-        float jointLimUpper,
-        float driveGainP,
-        float driveGainD,
-        float driveMaxForce,
-        float density
-    );
-
-    PHYSX_WRAPPER_API void ResetArticulationRobot(PxwArticulationRobot* robot);
-
-    PHYSX_WRAPPER_API void DriveJoints(PxwArticulationRobot* robot, float* targetJointPositions);
-
-    PHYSX_WRAPPER_API void ReleaseArticulationRobot(PxwArticulationRobot* robot);
-
-    PHYSX_WRAPPER_API void GetRobotJointPositions(PxwArticulationRobot* robot, void* destArray, int length);
-
-    PHYSX_WRAPPER_API void GetRobotLinkIncomingForce(PxwArticulationRobot* robot, int n, PxwSpatialForceData* destSpatialForceData);
-
-    PHYSX_WRAPPER_API void GetRobotLinkPoses(PxwArticulationRobot* robot, void* destArray, int length);
-
-    PHYSX_WRAPPER_API void GetRobotForwardKinematics(PxwArticulationRobot* robot, float* q, Matrix4f* destArray);
-
-    PHYSX_WRAPPER_API void GetRobotJacobianBody(PxwArticulationRobot* robot, float* q, float* destArray, int rows, int cols);
-
-    PHYSX_WRAPPER_API void GetRobotJacobianSpatial(PxwArticulationRobot* robot, float* q, float* destArray, int rows, int cols);
-
-    PHYSX_WRAPPER_API bool GetRobotInverseKinematics(PxwArticulationRobot* robot, float* qInit, PxwTransformData* targetTransformEEJoint, float tolerance, int numIterations, float lambda);
-
     // Utility functions
 
     PHYSX_WRAPPER_API PxTriangleMesh* CreateBV33TriangleMesh(
@@ -523,5 +438,74 @@ extern "C" {
 
     PHYSX_WRAPPER_API void GetArticulationCacheJointForces(PxArticulationCache* cache, float* forces, PxU32 bufferSize);
     PHYSX_WRAPPER_API void SetArticulationCacheJointForces(PxArticulationCache* cache, float* forces, PxU32 bufferSize);
+
+    // Vehicles (PhysX Vehicle2)
+
+    // Lifecycle
+    PHYSX_WRAPPER_API PxwVehicle* CreateVehicle(PxScene* scene, int driveMode, PxwVehicleChassisDesc* chassis, PxGeometry* chassisGeometry, PxMaterial* material);
+
+    PHYSX_WRAPPER_API void AddVehicleToScene(PxwVehicle* vehicle);
+
+    PHYSX_WRAPPER_API void RemoveVehicleFromScene(PxwVehicle* vehicle);
+
+    PHYSX_WRAPPER_API void ReleaseVehicle(PxwVehicle* vehicle);
+
+    // Setup (call before FinalizeVehicle)
+    PHYSX_WRAPPER_API void SetVehicleFrame(PxwVehicle* vehicle, PxwVehicleFrameDesc* frame);
+
+    PHYSX_WRAPPER_API void SetVehicleAxleDescription(PxwVehicle* vehicle, int nbAxles, int* nbWheelsPerAxle, int* wheelIdsInAxleOrder);
+
+    PHYSX_WRAPPER_API void SetVehicleWheelParams(PxwVehicle* vehicle, int wheelId, PxwVehicleWheelDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleSuspensionParams(PxwVehicle* vehicle, int wheelId, PxwVehicleSuspensionDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleSuspensionCompliance(PxwVehicle* vehicle, int wheelId, PxwVehicleSuspensionComplianceDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleTireParams(PxwVehicle* vehicle, int wheelId, PxwVehicleTireDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleBrakeParams(PxwVehicle* vehicle, int brakeSet, PxwVehicleBrakeDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleSteerParams(PxwVehicle* vehicle, PxwVehicleSteerDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleAckermannParams(PxwVehicle* vehicle, PxwVehicleAckermannDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleDifferentialParams(PxwVehicle* vehicle, PxwVehicleDifferentialDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleEngineParams(PxwVehicle* vehicle, PxwVehicleEngineDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleGearboxParams(PxwVehicle* vehicle, PxwVehicleGearboxDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleAutoboxParams(PxwVehicle* vehicle, PxwVehicleAutoboxDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleClutchParams(PxwVehicle* vehicle, PxwVehicleClutchDesc* desc);
+
+    PHYSX_WRAPPER_API void SetVehicleTireFrictionTable(PxwVehicle* vehicle, PxMaterial** materials, float* frictions, int count, float defaultFriction);
+
+    PHYSX_WRAPPER_API void SetVehicleRoadGeometryQueryType(PxwVehicle* vehicle, int type);
+
+    PHYSX_WRAPPER_API void SetVehicleUseDirectWheelControl(PxwVehicle* vehicle, bool use);
+
+    // Direct-drive throttle -> per-wheel drive-torque response (direct drive only).
+    PHYSX_WRAPPER_API void SetVehicleDirectDriveThrottleParams(PxwVehicle* vehicle, float maxResponse, float* wheelResponseMultipliers, int nbWheels);
+
+    PHYSX_WRAPPER_API bool FinalizeVehicle(PxwVehicle* vehicle);
+
+    // Control (call after FinalizeVehicle)
+    PHYSX_WRAPPER_API void SetVehicleCommands(PxwVehicle* vehicle, float brake0, float brake1, float throttle, float steer);
+
+    PHYSX_WRAPPER_API void SetVehicleTransmissionCommand(PxwVehicle* vehicle, int targetGear, float clutch);
+
+    PHYSX_WRAPPER_API void SetVehicleTankThrusts(PxwVehicle* vehicle, float thrust0, float thrust1);
+
+    PHYSX_WRAPPER_API void SetVehicleWheelControl(PxwVehicle* vehicle, int wheelId, float driveTorque, float brakeTorque, float steerAngle);
+
+    // Readback
+    PHYSX_WRAPPER_API void GetVehicleRigidBodyPose(PxwVehicle* vehicle, PxwTransformData* destPose);
+
+    PHYSX_WRAPPER_API void GetVehicleWheelStates(PxwVehicle* vehicle, PxwVehicleWheelState* destArray, int length);
+
+    PHYSX_WRAPPER_API void GetVehicleDriveState(PxwVehicle* vehicle, PxwVehicleDriveState* dest);
+
+    PHYSX_WRAPPER_API PxRigidActor* GetVehicleActor(PxwVehicle* vehicle);
 
 }

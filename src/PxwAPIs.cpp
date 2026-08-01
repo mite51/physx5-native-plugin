@@ -1,4 +1,6 @@
 #include "PxwAPIs.h"
+#include "VehicleHelper.h"
+#include "VehicleModule.h"
 
 
 static PhysXWrapper gPhysXWrapper;
@@ -119,14 +121,12 @@ void RemovePBDObjectFromParticleSystem(PxwParticleSystemObject* particleSystemOb
 }
 #endif
 
-void AddArticulationToScene(PxwArticulationKinematicTree* articulation)
+void RemoveArticulationFromScene(PxArticulationReducedCoordinate* articulation)
 {
-	articulation->AddToScene();
-}
-
-void RemoveArticulationFromScene(PxwArticulationKinematicTree* articulation)
-{
-	articulation->RemoveFromScene();
+	if (articulation && articulation->getScene())
+	{
+		articulation->getScene()->removeArticulation(*articulation);
+	}
 }
 
 #ifdef USE_GPU
@@ -340,145 +340,6 @@ void SetKinematicTarget(PxActor* actor, PxwTransformData* pose)
 void ReleaseMesh(PxTriangleMesh* mesh)
 {
 	mesh->release();
-}
-
-// Robotics
-
-PxwArticulationKinematicTree* CreateArticulationKinematicTree(PxScene* scene, bool fixBase, bool disableSelfCollision)
-{
-	return gPhysXWrapper.CreatePxArticulationKinematicTree(scene, fixBase, disableSelfCollision);
-}
-
-PxArticulationLink* CreateArticulationKinematicTreeBase(PxwArticulationKinematicTree* kinematicTree, PxwTransformData* basePose, PxShape* shape, float density)
-{
-	return kinematicTree->CreateBase(*basePose, shape, density);
-}
-
-PxArticulationLink* AddLinkToArticulationKinematicTree(PxwArticulationKinematicTree* kinematicTree, PxArticulationLink* parentLink, PxwTransformData* linkPose, PxwRobotJointType::Enum type, PxwTransformData* jointPoseParent, PxwTransformData* jointPoseChild, PxArticulationAxis::Enum dofAxis, PxShape* shape, float jointLimLower, float jointLimUpper, bool isDriveJoint, float stiffness, float damping, float driveMaxForce, float density)
-{
-	return kinematicTree->AddLink(parentLink, *linkPose, type, *jointPoseParent, *jointPoseChild, dofAxis, shape, jointLimLower, jointLimUpper, isDriveJoint, stiffness, damping, driveMaxForce, density);
-}
-
-void ResetArticulationKinematicTree(PxwArticulationKinematicTree* kinematicTree)
-{
-	kinematicTree->ResetObject();
-}
-
-void DriveArticulationKinematicTreeJoints(PxwArticulationKinematicTree* kinematicTree, float* targetJointPositions)
-{
-	kinematicTree->DriveJoints(targetJointPositions);
-}
-
-void ReleaseArticulationKinematicTree(PxwArticulationKinematicTree* kinematicTree)
-{
-	kinematicTree->Release();
-	delete kinematicTree;
-}
-
-void GetArticulationKinematicTreeJointPositions(PxwArticulationKinematicTree* kinematicTree, void* destArray, int length)
-{
-	memcpy(destArray, kinematicTree->GetJointPositions(), length * sizeof(float));;
-}
-
-void GetArticulationKinematicTreeLinkPoses(PxwArticulationKinematicTree* kinematicTree, void* destArray, int length)
-{
-	PxwTransformData* poseData = kinematicTree->GetLinkPoses();
-	memcpy(destArray, poseData, length * sizeof(PxwTransformData));
-}
-
-PxwArticulationRobot* CreateArticulationRobot(PxScene* scene, PxwTransformData* pose, float density)
-{
-	return gPhysXWrapper.CreateArticulationRobot(scene, *pose, density);
-}
-
-PxArticulationLink* AddLinkToRobot(
-	PxwArticulationRobot* robot,
-	PxwTransformData* linkPose,
-	PxwRobotJointType::Enum type,
-	PxwTransformData* jointPoseParent,
-	PxwTransformData* jointPoseChild,
-	PxShape* shape,
-	float jointLimLower,
-	float jointLimUpper,
-	float stiffness,
-	float damping,
-	float driveMaxForce,
-	float density
-)
-{
-	return robot->AddBodyLink(*linkPose, type, *jointPoseParent, *jointPoseChild, shape, jointLimLower, jointLimUpper, stiffness, damping, driveMaxForce, density);
-}
-
-PxArticulationLink* AddEndEffectorLinkToRobot(
-	PxwArticulationRobot* robot,
-	PxwTransformData* linkPose,
-	PxwRobotJointType::Enum type,
-	PxwTransformData* jointPoseParent,
-	PxwTransformData* jointPoseChild,
-	PxShape* shape,
-	float jointLimLower,
-	float jointLimUpper,
-	float stiffness,
-	float damping,
-	float driveMaxForce,
-	float density
-) {
-	return robot->AddEndEffectorLink(*linkPose, type, *jointPoseParent, *jointPoseChild, shape, jointLimLower, jointLimUpper, stiffness, damping, driveMaxForce, density);
-}
-
-void ResetArticulationRobot(PxwArticulationRobot* robot)
-{
-	robot->ResetObject();
-}
-
-void DriveJoints(PxwArticulationRobot* robot, float* targetJointPositions)
-{
-	robot->DriveJoints(targetJointPositions);
-}
-
-void ReleaseArticulationRobot(PxwArticulationRobot* robot)
-{
-	robot->Release();
-	delete robot;
-}
-
-void GetRobotJointPositions(PxwArticulationRobot* robot, void* destArray, int length)
-{
-	memcpy(destArray, robot->GetJointPositions(), length * sizeof(float));
-}
-
-void GetRobotLinkIncomingForce(PxwArticulationRobot* robot, int n, PxwSpatialForceData* destSpatialForceData)
-{
-	*destSpatialForceData = robot->GetLinkIncomingJointForce(n);
-}
-
-void GetRobotLinkPoses(PxwArticulationRobot* robot, void* destArray, int length)
-{
-	PxwTransformData* poseData = robot->GetLinkPoses();
-	memcpy(destArray, poseData, length * sizeof(PxwTransformData));
-}
-
-void GetRobotForwardKinematics(PxwArticulationRobot* robot, float* q, Matrix4f* destArray)
-{
-	Matrix4f p = robot->ForwardKinematics(q);
-	memcpy(destArray, &p, sizeof(Matrix4f));
-}
-
-void GetRobotJacobianBody(PxwArticulationRobot* robot, float* q, float* destArray, int rows, int cols)
-{
-	Eigen::MatrixXf Jn = robot->ComputeJacobianBody(q);
-	memcpy(destArray, Jn.data(), rows * cols * sizeof(float));
-}
-
-void GetRobotJacobianSpatial(PxwArticulationRobot* robot, float* q, float* destArray, int rows, int cols)
-{
-	Eigen::MatrixXf Js = robot->ComputeJacobianSpatial(q);
-	memcpy(destArray, Js.data(), rows * cols * sizeof(float));
-}
-
-bool GetRobotInverseKinematics(PxwArticulationRobot* robot, float* qInit, PxwTransformData* targetTransformEEJoint, float tolerance, int numIterations, float lambda)
-{
-	return robot->InverseKinematics(qInit, *targetTransformEEJoint, tolerance, numIterations, lambda);
 }
 
 // Utility functions
@@ -852,6 +713,20 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
 	articulation->putToSleep();
  }
 
+ // No-ops: the underlying setMaxCOM*Velocity API was removed in PhysX 5.6.1 (see CHANGES.md).
+ // Kept as exported stubs to preserve the C ABI for existing callers.
+ void SetArticulationMaxCOMLinearVelocity(PxArticulationReducedCoordinate* articulation, PxReal maxLinearVelocity)
+ {
+	PX_UNUSED(articulation);
+	PX_UNUSED(maxLinearVelocity);
+ }
+
+ void SetArticulationMaxCOMAngularVelocity(PxArticulationReducedCoordinate* articulation, PxReal maxAngularVelocity)
+ {
+	PX_UNUSED(articulation);
+	PX_UNUSED(maxAngularVelocity);
+ }
+
  PxArticulationCache* CreateArticulationCache(PxArticulationReducedCoordinate* articulation)
  {
 	return articulation->createCache();
@@ -1061,7 +936,7 @@ PxArticulationCache* CreateArticulationInternalStateCache(PxArticulationReducedC
         return NULL;
     }
     
-	articulation->createCache();
+	return articulation->createCache();
 }
 
 void ReleaseArticulationInternalStateCache(PxArticulationCache* cache)
@@ -1176,6 +1051,208 @@ void SetArticulationCacheJointForces(PxArticulationCache* cache, float* forces, 
     {
         memcpy(cache->jointForce, forces, bufferSize * sizeof(float));
     }
+}
+
+// ===================== Vehicles (PhysX Vehicle2) =====================
+
+PxwVehicle* CreateVehicle(PxScene* scene, int driveMode, PxwVehicleChassisDesc* chassis, PxGeometry* chassisGeometry, PxMaterial* material)
+{
+    if (!scene || !chassis)
+        return NULL;
+    PxMaterial* mat = material ? material : gMaterial;
+    return new PxwVehicle(scene, static_cast<PxwVehicleDriveMode::Enum>(driveMode), *chassis, chassisGeometry, mat);
+}
+
+void AddVehicleToScene(PxwVehicle* vehicle)
+{
+    if (!vehicle)
+        return;
+    vehicle->AddToScene();
+    VehicleRegister(vehicle->Scene(), vehicle);
+}
+
+void RemoveVehicleFromScene(PxwVehicle* vehicle)
+{
+    if (!vehicle)
+        return;
+    VehicleUnregister(vehicle);
+    vehicle->RemoveFromScene();
+}
+
+void ReleaseVehicle(PxwVehicle* vehicle)
+{
+    if (!vehicle)
+        return;
+    VehicleUnregister(vehicle);
+    delete vehicle;
+}
+
+void SetVehicleFrame(PxwVehicle* vehicle, PxwVehicleFrameDesc* frame)
+{
+    if (!vehicle || !frame)
+        return;
+    vehicle->SetFrame(*frame);
+    VehicleSetSceneFrame(vehicle->Scene(), *frame);
+}
+
+void SetVehicleAxleDescription(PxwVehicle* vehicle, int nbAxles, int* nbWheelsPerAxle, int* wheelIdsInAxleOrder)
+{
+    if (vehicle)
+        vehicle->SetAxleDescription(nbAxles, nbWheelsPerAxle, wheelIdsInAxleOrder);
+}
+
+void SetVehicleWheelParams(PxwVehicle* vehicle, int wheelId, PxwVehicleWheelDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetWheel(wheelId, *desc);
+}
+
+void SetVehicleSuspensionParams(PxwVehicle* vehicle, int wheelId, PxwVehicleSuspensionDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetSuspension(wheelId, *desc);
+}
+
+void SetVehicleSuspensionCompliance(PxwVehicle* vehicle, int wheelId, PxwVehicleSuspensionComplianceDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetSuspensionCompliance(wheelId, *desc);
+}
+
+void SetVehicleTireParams(PxwVehicle* vehicle, int wheelId, PxwVehicleTireDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetTire(wheelId, *desc);
+}
+
+void SetVehicleBrakeParams(PxwVehicle* vehicle, int brakeSet, PxwVehicleBrakeDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetBrake(brakeSet, *desc);
+}
+
+void SetVehicleSteerParams(PxwVehicle* vehicle, PxwVehicleSteerDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetSteer(*desc);
+}
+
+void SetVehicleAckermannParams(PxwVehicle* vehicle, PxwVehicleAckermannDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetAckermann(*desc);
+}
+
+void SetVehicleDifferentialParams(PxwVehicle* vehicle, PxwVehicleDifferentialDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetDifferential(*desc);
+}
+
+void SetVehicleEngineParams(PxwVehicle* vehicle, PxwVehicleEngineDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetEngine(*desc);
+}
+
+void SetVehicleGearboxParams(PxwVehicle* vehicle, PxwVehicleGearboxDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetGearbox(*desc);
+}
+
+void SetVehicleAutoboxParams(PxwVehicle* vehicle, PxwVehicleAutoboxDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetAutobox(*desc);
+}
+
+void SetVehicleClutchParams(PxwVehicle* vehicle, PxwVehicleClutchDesc* desc)
+{
+    if (vehicle && desc)
+        vehicle->SetClutch(*desc);
+}
+
+void SetVehicleTireFrictionTable(PxwVehicle* vehicle, PxMaterial** materials, float* frictions, int count, float defaultFriction)
+{
+    if (vehicle)
+        vehicle->SetTireFriction(materials, frictions, count, defaultFriction);
+}
+
+void SetVehicleRoadGeometryQueryType(PxwVehicle* vehicle, int type)
+{
+    if (vehicle)
+        vehicle->SetRoadQueryType(static_cast<PxwVehicleRoadQueryType::Enum>(type));
+}
+
+void SetVehicleUseDirectWheelControl(PxwVehicle* vehicle, bool use)
+{
+    if (vehicle)
+        vehicle->SetUseDirectWheelControl(use);
+}
+
+void SetVehicleDirectDriveThrottleParams(PxwVehicle* vehicle, float maxResponse, float* wheelResponseMultipliers, int nbWheels)
+{
+    if (vehicle)
+        vehicle->SetDirectDriveThrottle(maxResponse, wheelResponseMultipliers, nbWheels);
+}
+
+bool FinalizeVehicle(PxwVehicle* vehicle)
+{
+    if (!vehicle)
+        return false;
+    PxTolerancesScale scale = gPhysXWrapper.GetPhysics()->getTolerancesScale();
+    PxCookingParams cooking(scale);
+    return vehicle->Finalize(gPhysXWrapper.GetPhysics(), cooking, gMaterial);
+}
+
+void SetVehicleCommands(PxwVehicle* vehicle, float brake0, float brake1, float throttle, float steer)
+{
+    if (vehicle)
+        vehicle->SetCommands(brake0, brake1, throttle, steer);
+}
+
+void SetVehicleTransmissionCommand(PxwVehicle* vehicle, int targetGear, float clutch)
+{
+    if (vehicle)
+        vehicle->SetTransmissionCommand(targetGear, clutch);
+}
+
+void SetVehicleTankThrusts(PxwVehicle* vehicle, float thrust0, float thrust1)
+{
+    if (vehicle)
+        vehicle->SetTankThrusts(thrust0, thrust1);
+}
+
+void SetVehicleWheelControl(PxwVehicle* vehicle, int wheelId, float driveTorque, float brakeTorque, float steerAngle)
+{
+    if (vehicle)
+        vehicle->SetWheelControl(wheelId, driveTorque, brakeTorque, steerAngle);
+}
+
+void GetVehicleRigidBodyPose(PxwVehicle* vehicle, PxwTransformData* destPose)
+{
+    if (vehicle)
+        vehicle->GetRigidBodyPose(destPose);
+}
+
+void GetVehicleWheelStates(PxwVehicle* vehicle, PxwVehicleWheelState* destArray, int length)
+{
+    if (vehicle)
+        vehicle->GetWheelStates(destArray, length);
+}
+
+void GetVehicleDriveState(PxwVehicle* vehicle, PxwVehicleDriveState* dest)
+{
+    if (vehicle)
+        vehicle->GetDriveState(dest);
+}
+
+PxRigidActor* GetVehicleActor(PxwVehicle* vehicle)
+{
+    if (!vehicle)
+        return NULL;
+    return vehicle->GetActor();
 }
 
 

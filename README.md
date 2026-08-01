@@ -2,7 +2,13 @@
 
 # Built for PhysX 5.6.1
 
-A simple wrapper for using PhysX 5 in Unity.
+A simple wrapper for using PhysX 5 in Unity. Supports rigid bodies, articulations, FEM soft bodies, PBD cloth/fluid and PhysX Vehicle2 vehicles.
+
+## Vehicles (PhysX Vehicle2)
+
+The wrapper exposes PhysX Vehicle2 through an opaque `PxwVehicle` handle. The NVIDIA vehicle snippet classes are vendored and adapted under `src/vehicle/` (`PxwBaseVehicle`, `PxwPhysXActorVehicle`, `PxwDirectDriveVehicle`, `PxwEngineDriveVehicle`). Vehicles are authored from plain, blittable descriptors defined in `src/VehicleInterop.h` (one per part: wheel, tire, suspension, engine, gearbox, autobox, clutch, differential, etc.), so the interop ABI is independent of PhysX's internal structs. Per-scene setup (`PxVehiclePhysXSimulationContext`, unit-cylinder sweep mesh and the vehicle registry) lives in `src/PhysXWrapper_Vehicle.cpp`; registered vehicles are stepped before `PxScene::simulate()`. All three drive models are supported (direct drive, engine drive, and raw per-wheel control). The C exports live in `include/PxwAPIs.h` / `src/PxwAPIs.cpp`.
+
+> The legacy robot layer (`Robotics.*`, `PhysXWrapper_Robotics.cpp`) and the vendored Eigen library have been removed. The low-level `PxArticulationReducedCoordinate` API remains.
 
 ## Supported Platforms
 
