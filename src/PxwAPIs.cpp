@@ -5,6 +5,17 @@
 
 static PhysXWrapper gPhysXWrapper;
 static PxMaterial* gMaterial = NULL;
+
+namespace pxw
+{
+	// Lets translation units added later (the deterministic simulation layer) reach
+	// the wrapper without introducing a second global.
+	PhysXWrapper& GetGlobalPhysXWrapper()
+	{
+		return gPhysXWrapper;
+	}
+}
+
 // Basics
 
 bool InitializePhysX() {

@@ -19,6 +19,7 @@
 
 #include <mutex>
 #include <sstream>
+#include <vector>
 
 using namespace physx;
 #ifdef USE_GPU
@@ -27,6 +28,12 @@ using namespace ExtGpu;
 using namespace std;
 
 namespace pxw {
+
+	// Optional immediate log sink installed via PxwSetLogCallback. Declared here so
+	// BufferedErrorCallback can forward diagnostics the moment they are reported
+	// instead of waiting for the managed side to poll GetPhysxErrors.
+	typedef void(*PxwLogSink)(int severity, const char* message);
+	extern PxwLogSink gPxwLogSink;
 
 	// Add this new class before PhysXWrapper
 	class BufferedErrorCallback : public PxDefaultErrorCallback 
@@ -37,12 +44,32 @@ namespace pxw {
 
 	public:
 		virtual void reportError(PxErrorCode::Enum code, const char* message, const char* file, int line) override {
-			std::lock_guard<std::mutex> lock(mMutex);
-			// Format error message
-			std::stringstream ss;
-			ss << "PhysX Error [" << code << "] in " << file << ":" << line << " - " << message << "\n";
-			mErrorBuffer += ss.str();
-			
+			std::string formatted;
+			{
+				std::lock_guard<std::mutex> lock(mMutex);
+				// Format error message
+				std::stringstream ss;
+				ss << "PhysX Error [" << code << "] in " << file << ":" << line << " - " << message << "\n";
+				formatted = ss.str();
+				mErrorBuffer += formatted;
+			}
+
+			// Forward immediately when a sink is installed. Done outside the lock so a
+			// callback that logs back into the plugin cannot deadlock.
+			PxwLogSink sink = gPxwLogSink;
+			if (sink != NULL)
+			{
+				int severity;
+				switch (code)
+				{
+				case PxErrorCode::eDEBUG_INFO:     severity = 1; break;
+				case PxErrorCode::eDEBUG_WARNING:
+				case PxErrorCode::ePERF_WARNING:   severity = 2; break;
+				default:                           severity = 3; break;
+				}
+				sink(severity, formatted.c_str());
+			}
+
 			// Also call parent implementation for default console output
 			PxDefaultErrorCallback::reportError(code, message, file, line);
 		}
@@ -73,7 +100,20 @@ namespace pxw {
 		PxPvd* mPvd = nullptr;
 		PxPvdTransport* mTransport = nullptr;
 
+		// PhysX only reproduces results for a fixed worker count, so dispatchers are
+		// cached per requested thread count rather than shared globally.
+		std::vector<std::pair<int, PxDefaultCpuDispatcher*>> mDispatchers;
+
+		// Set once the first scene has asked for a PVD connection. Scenes created with
+		// PxwSceneFlag::eDISABLE_PVD never trigger the connection attempt, which keeps
+		// headless test runs free of socket timeouts.
+		bool mPvdConnectAttempted = false;
+
 		static void SetupCommonCookingParams(PxCookingParams& params, bool skipMeshCleanup, bool skipEdgeData);
+
+		PxCpuDispatcher* GetOrCreateDispatcher(int workerThreads);
+
+		void TryConnectPvd();
 
 	public:
 		PhysXWrapper();
@@ -89,6 +129,14 @@ namespace pxw {
 		bool GetPhysXInitStatus();
 
 		PxScene* CreateScene(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu);
+
+		// Fully explicit scene creation. CreateScene above is a thin shim over this so
+		// existing callers keep their previous behaviour.
+		PxScene* CreateSceneEx(const PxwSceneDesc& desc);
+
+		PxMaterial* GetDefaultMaterial() { return mDefaultMaterial; }
+
+		bool HasCudaContext() const { return mCudaContextManager != NULL; }
 
 		void StepPhysics(PxReal dt);
 
@@ -207,4 +255,9 @@ namespace pxw {
 			return mErrorCallback.getAndClearErrors();
 		}
 	};
+
+	// The process-wide wrapper instance, defined in PxwAPIs.cpp. Exposed so that
+	// translation units added after the original design (such as the deterministic
+	// simulation layer) can reach PxPhysics without another global.
+	PhysXWrapper& GetGlobalPhysXWrapper();
 }

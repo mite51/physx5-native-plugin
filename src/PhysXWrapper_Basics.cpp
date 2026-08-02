@@ -48,7 +48,7 @@ namespace pxw
 			// worker the constraint partitioning and floating-point reduction order
 			// change, which perturbs the contact impulse at stiff footstrike contacts
 			// (instantaneous ankle/toe dof.vel kicks) even though positions barely move.
-			mDispatcher = PxDefaultCpuDispatcherCreate(0);
+			mDispatcher = (PxDefaultCpuDispatcher*)GetOrCreateDispatcher(0);
 
 #ifdef USE_GPU
 			// Init CUDA
@@ -82,76 +82,169 @@ namespace pxw
 		return mIsPhysXInitialized;
 	}
 
+	PxCpuDispatcher* PhysXWrapper::GetOrCreateDispatcher(int workerThreads)
+	{
+		if (workerThreads < 0)
+		{
+			workerThreads = 0;
+		}
+
+		for (size_t i = 0; i < mDispatchers.size(); ++i)
+		{
+			if (mDispatchers[i].first == workerThreads)
+			{
+				return mDispatchers[i].second;
+			}
+		}
+
+		PxDefaultCpuDispatcher* dispatcher = PxDefaultCpuDispatcherCreate((PxU32)workerThreads);
+		mDispatchers.push_back(std::make_pair(workerThreads, dispatcher));
+		return dispatcher;
+	}
+
+	void PhysXWrapper::TryConnectPvd()
+	{
+		if (mPvdConnectAttempted || mPvd == NULL || mTransport == NULL)
+		{
+			return;
+		}
+		mPvdConnectAttempted = true;
+
+		if (!mPvd->connect(*mTransport, PxPvdInstrumentationFlag::eALL))
+		{
+			PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "PVD connection failed!\n");
+		}
+
+		if (mPvd->isConnected())
+		{
+			PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "PVD is connected!\n");
+		}
+		else
+		{
+			PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "PVD is NOT connected!\n");
+		}
+	}
+
 	PxScene* PhysXWrapper::CreateScene(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu)
 	{
+		// Preserve the historical defaults exactly so existing callers are unaffected.
+		PxwSceneDesc desc;
+		desc.gravity = *gravity;
+		desc.flags = PxwSceneFlag::eENABLE_PCM;
+		desc.pruningStructureType = (PxI32)pruningStructureType;
+		desc.solverType = (PxI32)solverType;
+		desc.broadPhaseType = -1;
+		desc.cpuWorkerThreads = 0;
+		desc.useGpu = useGpu ? 1 : 0;
+		desc.bounceThresholdVelocity = 0.2f;
+		desc.frictionOffsetThreshold = 0.04f;
+		desc.ccdMaxPasses = 1;
 
-		if (mPvd && mTransport && mScenes.size() == 0)
+		if (useGpu)
 		{
-			if (mTransport && !mPvd->connect(*mTransport, PxPvdInstrumentationFlag::eALL))
-			{
-				PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "PVD connection failed!\n");
-			}
+			desc.flags |= PxwSceneFlag::eENABLE_DIRECT_GPU_API;
+		}
 
-			if (mPvd->isConnected())
-			{
-				PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "PVD is connected!\n");
-			}
-			else
-			{
-				PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "PVD is NOT connected!\n");
-			}
+		return CreateSceneEx(desc);
+	}
 
+	PxScene* PhysXWrapper::CreateSceneEx(const PxwSceneDesc& desc)
+	{
+		const bool useGpu = desc.useGpu != 0;
+		const bool pvdDisabled = (desc.flags & PxwSceneFlag::eDISABLE_PVD) != 0;
+
+		if (!pvdDisabled)
+		{
+			TryConnectPvd();
 		}
 
 		PxSceneDesc sceneDesc(mPhysics->getTolerancesScale());
-		sceneDesc.gravity = *gravity;
-		sceneDesc.cpuDispatcher = mDispatcher;
+		sceneDesc.gravity = desc.gravity;
+		sceneDesc.cpuDispatcher = GetOrCreateDispatcher(desc.cpuWorkerThreads);
 		sceneDesc.filterShader = PxDefaultSimulationFilterShader;
+		sceneDesc.staticStructure = (PxPruningStructureType::Enum)desc.pruningStructureType;
+		sceneDesc.solverType = (PxSolverType::Enum)desc.solverType;
+		sceneDesc.bounceThresholdVelocity = desc.bounceThresholdVelocity;
+		sceneDesc.frictionOffsetThreshold = desc.frictionOffsetThreshold;
+		sceneDesc.ccdMaxPasses = desc.ccdMaxPasses;
 
-		sceneDesc.cudaContextManager = mCudaContextManager;
-		sceneDesc.staticStructure = pruningStructureType;
-		sceneDesc.flags |= PxSceneFlag::eENABLE_PCM;
-		//sceneDesc.flags |= PxSceneFlag::eENABLE_CCD;
-		
+		if (desc.flags & PxwSceneFlag::eENABLE_PCM)           sceneDesc.flags |= PxSceneFlag::eENABLE_PCM;
+		if (desc.flags & PxwSceneFlag::eENABLE_CCD)           sceneDesc.flags |= PxSceneFlag::eENABLE_CCD;
+		if (desc.flags & PxwSceneFlag::eENABLE_STABILIZATION) sceneDesc.flags |= PxSceneFlag::eENABLE_STABILIZATION;
+		if (desc.flags & PxwSceneFlag::eENABLE_ACTIVE_ACTORS) sceneDesc.flags |= PxSceneFlag::eENABLE_ACTIVE_ACTORS;
+
+		if (desc.flags & PxwSceneFlag::eENABLE_ENHANCED_DETERMINISM)
+		{
+			// PhysX does not support enhanced determinism together with GPU dynamics.
+			// Refuse the combination loudly rather than silently producing a scene that
+			// cannot deliver the guarantee the caller asked for.
+			if (useGpu)
+			{
+				PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, __FILE__, __LINE__,
+					"Enhanced determinism is not supported with GPU dynamics; the flag was ignored for this scene.\n");
+			}
+			else
+			{
+				sceneDesc.flags |= PxSceneFlag::eENABLE_ENHANCED_DETERMINISM;
+			}
+		}
+
 		if (useGpu)
 		{
-			// enable GPU dynamics and collision
-			sceneDesc.flags |= PxSceneFlag::eENABLE_GPU_DYNAMICS;
-			sceneDesc.flags |= PxSceneFlag::eENABLE_DIRECT_GPU_API;
-			sceneDesc.broadPhaseType = PxBroadPhaseType::eGPU;
+			if (mCudaContextManager == NULL)
+			{
+				PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__,
+					"A GPU scene was requested but no CUDA context is available; falling back to CPU simulation.\n");
+			}
+			else
+			{
+				sceneDesc.cudaContextManager = mCudaContextManager;
+				sceneDesc.flags |= PxSceneFlag::eENABLE_GPU_DYNAMICS;
+				sceneDesc.broadPhaseType = PxBroadPhaseType::eGPU;
+
+				// The direct GPU API bypasses the CPU-visible actor state, so
+				// getGlobalPose and friends return stale data while it is on. Only
+				// enable it when the caller has explicitly asked for it.
+				if (desc.flags & PxwSceneFlag::eENABLE_DIRECT_GPU_API)
+				{
+					sceneDesc.flags |= PxSceneFlag::eENABLE_DIRECT_GPU_API;
+				}
+			}
 		}
-		else
+
+		if (desc.broadPhaseType >= 0)
+		{
+			sceneDesc.broadPhaseType = (PxBroadPhaseType::Enum)desc.broadPhaseType;
+		}
+		else if (sceneDesc.broadPhaseType != PxBroadPhaseType::eGPU)
 		{
 			sceneDesc.broadPhaseType = PxBroadPhaseType::eABP;
 		}
 
-		sceneDesc.solverType = solverType;
-		sceneDesc.filterShader = PxDefaultSimulationFilterShader;
-		sceneDesc.bounceThresholdVelocity = 0.2f;
-
-		std::string message = "creating client! solver type: " + to_string((int)solverType) + " useGpu: " + to_string(useGpu) + "\n";
-		PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, message.c_str());
 		PxScene* scene = mPhysics->createScene(sceneDesc);
-
-		// Make sure PVD flags are set immediately after scene creation
-		PxPvdSceneClient* pvdClient = scene->getScenePvdClient();
-		if(pvdClient)
+		if (scene == NULL)
 		{
-			pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_CONSTRAINTS, true);
-			pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_CONTACTS, true);
-			pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_SCENEQUERIES, true);
+			PxGetFoundation().error(PxErrorCode::eINTERNAL_ERROR, __FILE__, __LINE__, "createScene returned null.\n");
+			return NULL;
 		}
-		else
+
+		if (!pvdDisabled)
 		{
-			PxGetFoundation().error(PxErrorCode::eINVALID_OPERATION, __FILE__, __LINE__, "pvdClient missing!\n");
-		}		
+			PxPvdSceneClient* pvdClient = scene->getScenePvdClient();
+			if (pvdClient)
+			{
+				pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_CONSTRAINTS, true);
+				pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_CONTACTS, true);
+				pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_SCENEQUERIES, true);
+			}
+		}
 
 		mScenes.pushBack(scene);
 
 		// Register a per-scene vehicle simulation context.
 		VehicleRegisterScene(scene);
 
-		return scene; // Return the scene
+		return scene;
 	}
 
 	void PhysXWrapper::StepPhysics(PxReal dt)
@@ -212,17 +305,21 @@ namespace pxw
 		}
 	}
 
+	// Steps a single scene without touching the global mStep gate used by the
+	// step-all-scenes entry points. Independent scenes must be able to advance
+	// independently, which is what lets several simulation worlds run side by side in
+	// one process.
 	void PhysXWrapper::StepScene(PxScene* scene, PxReal dt)
 	{
-		if (mIsRunning && mStep)
+		if (!mIsRunning || scene == NULL)
 		{
-			mStep = false;
-			VehicleStepScene(scene, dt);
-			scene->simulate(dt);
-			scene->fetchResults(true);
-			scene->fetchResultsParticleSystem();
-			mStep = true;
+			return;
 		}
+
+		VehicleStepScene(scene, dt);
+		scene->simulate(dt);
+		scene->fetchResults(true);
+		scene->fetchResultsParticleSystem();
 	}
 
 	void PhysXWrapper::ReleaseScene(PxScene* scene)
@@ -241,10 +338,11 @@ namespace pxw
 		}
 		scene->release();
 
-		if (mScenes.size() == 0)
+		if (mScenes.size() == 0 && mPvd != NULL && mPvd->isConnected())
 		{
 			PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "PVD disconnected!\n");
 			mPvd->disconnect();
+			mPvdConnectAttempted = false;
 		}
 	}
 
@@ -272,7 +370,14 @@ namespace pxw
 		// Tear down the vehicle extension before core extensions/physics.
 		VehicleCleanup();
 
-		PX_RELEASE(mDispatcher);
+		for (size_t i = 0; i < mDispatchers.size(); ++i)
+		{
+			PX_RELEASE(mDispatchers[i].second);
+		}
+		mDispatchers.clear();
+		mDispatcher = NULL;
+		mPvdConnectAttempted = false;
+
 		PxCloseExtensions();
 		PX_RELEASE(mPhysics);
 		PX_RELEASE(mFoundation);
