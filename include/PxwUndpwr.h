@@ -118,7 +118,7 @@ namespace pxw
     {
         PxU32 stableId;
         PxU32 kind;
-        PxwTransformData pose;
+        PxwPose pose;   //!< Quaternion-first, matching the managed SimTransform it marshals into.
     };
 
     /// The identity PhysX assigned to a registered body, paired with the stable ID the
@@ -139,6 +139,44 @@ namespace pxw
         PxU32 internalActorIndex;   ///< PxRigidActor::getInternalActorIndex
         PxU32 padding;
         PxU64 islandNodeIndex;      ///< PxRigidBody::getInternalIslandNodeIndex
+    };
+
+    /// The shape of a query volume for overlaps and sweeps. Mirrors the managed
+    /// SimQueryShape: 0 sphere, 1 box, 2 capsule.
+    struct PxwQueryShape
+    {
+        enum Enum : PxU32
+        {
+            eSPHERE = 0,
+            eBOX = 1,
+            eCAPSULE = 2
+        };
+    };
+
+    /// One hit from a raycast or sweep, resolved to the stable ID of the body it struck.
+    /// Laid out to match the managed SimRaycastHit field-for-field, since arrays of these
+    /// are written straight across the interop boundary.
+    ///
+    /// Raycasts and sweeps return their hits sorted by distance ascending, with stable ID
+    /// breaking ties. PhysX does not guarantee an order for touching hits, so one is
+    /// imposed here where the distances are already known; two peers iterating the same
+    /// hits in a different order would take different gameplay decisions and desync.
+    struct PxwRaycastHit
+    {
+        PxU32 stableId;
+        PxU32 kind;
+        PxVec3 point;      //!< World-space contact point.
+        PxVec3 normal;     //!< World-space surface normal at the hit.
+        PxReal distance;   //!< Distance along the ray or sweep to the hit.
+        PxU32 faceIndex;   //!< Struck triangle for a mesh, 0xFFFFFFFF otherwise.
+    };
+
+    /// One body found by an overlap query, resolved to its stable ID. Returned sorted by
+    /// stable ID ascending, since an overlap has no natural order to sort by.
+    struct PxwOverlapHit
+    {
+        PxU32 stableId;
+        PxU32 kind;
     };
 
     /// How aggressively to erase the simulation state PhysX carries between steps but
@@ -201,7 +239,7 @@ namespace pxw
     {
         PxReal mass;                      //!< Total mass.
         PxVec3 inertia;                   //!< Diagonal inertia, expressed in the mass frame.
-        PxwTransformData cMassLocalPose;  //!< Mass frame relative to the actor origin.
+        PxwPose cMassLocalPose;           //!< Mass frame relative to the actor origin. Quaternion-first, matching the managed SimTransform.
 
         /// (largest - smallest) / largest principal moment. Near zero means the body is
         /// inertially close to a sphere and its principal axes are ill conditioned. Read
@@ -274,6 +312,68 @@ extern "C"
     /// explicit solver iterations, disabled speculative CCD variability and a fixed
     /// max depenetration velocity.
     PHYSX_WRAPPER_API void PxwApplyDeterministicRigidDefaults(PxRigidDynamic* actor, PxU32 positionIters, PxU32 velocityIters);
+
+    // -------------------------------------------------------- body gameplay I/O ----
+    //
+    // The forces, teleport and reads gameplay applies to a single body inside a step
+    // handler. Each takes the PxActor* the registry stored and forwards to the matching
+    // PxRigidBody / PxRigidActor call. Everything here must run inside OnBeforeStep on the
+    // managed side; a force applied outside the step handler happens on the original pass
+    // and not on the replay, which desyncs a peer against itself. mode is a PxForceMode.
+
+    PHYSX_WRAPPER_API void PxwBodyAddForce(PxActor* actor, const PxVec3* force, PxU32 mode);
+    PHYSX_WRAPPER_API void PxwBodyAddTorque(PxActor* actor, const PxVec3* torque, PxU32 mode);
+    PHYSX_WRAPPER_API void PxwBodyGetPose(PxActor* actor, pxw::PxwPose* outPose);
+
+    /// Places a body at a pose and sets its velocities in one call, for bringing a pooled
+    /// object into play. Re-pins the wake counter the way a restore does, so a spawned
+    /// body is awake and simulated rather than inheriting the pooled slot's sleep state.
+    /// A placement, not a physical move: use it only when activating a pooled entity.
+    PHYSX_WRAPPER_API void PxwBodyTeleport(PxActor* actor, const pxw::PxwPose* pose,
+                                           const PxVec3* velocity, const PxVec3* angularVelocity);
+
+    PHYSX_WRAPPER_API void PxwBodyGetLinearVelocity(PxActor* actor, PxVec3* outVelocity);
+    PHYSX_WRAPPER_API void PxwBodySetLinearVelocity(PxActor* actor, const PxVec3* velocity);
+    PHYSX_WRAPPER_API void PxwBodyGetAngularVelocity(PxActor* actor, PxVec3* outVelocity);
+    PHYSX_WRAPPER_API void PxwBodySetAngularVelocity(PxActor* actor, const PxVec3* velocity);
+    PHYSX_WRAPPER_API PxReal PxwBodyGetMass(PxActor* actor);
+
+    // ------------------------------------------------------------- scene queries ----
+    //
+    // World-level queries that resolve every hit to a stable ID and return them in a
+    // deterministic order (raycast and sweep by distance then ID, overlap by ID). Each
+    // returns the number of hits written, which may be fewer than were found when capacity
+    // truncates; the retained hits are the front of the sorted list. filterMask is ANDed
+    // against a per-kind bit (1u << kind); zero matches everything. A hit on an actor this
+    // world did not register is dropped rather than reported with a fabricated ID. Run
+    // these only from a step handler, against the committed scene outside the simulate
+    // window, which is where the managed layer calls them.
+
+    PHYSX_WRAPPER_API PxU32 PxwWorldRaycast(pxw::PxwWorld* world,
+        const PxVec3* origin, const PxVec3* direction, PxReal maxDistance,
+        PxU32 filterMask, pxw::PxwRaycastHit* hits, PxU32 capacity);
+
+    PHYSX_WRAPPER_API PxU32 PxwWorldOverlap(pxw::PxwWorld* world,
+        PxU32 shape, const PxVec3* center, const PxVec3* halfExtents, PxReal radius,
+        const PxQuat* rotation, PxU32 filterMask, pxw::PxwOverlapHit* hits, PxU32 capacity);
+
+    PHYSX_WRAPPER_API PxU32 PxwWorldSweep(pxw::PxwWorld* world,
+        PxU32 shape, const PxVec3* origin, const PxVec3* halfExtents, PxReal radius,
+        const PxQuat* rotation, const PxVec3* direction, PxReal maxDistance,
+        PxU32 filterMask, pxw::PxwRaycastHit* hits, PxU32 capacity);
+
+    // --------------------------------------------------------- contact draining ----
+    //
+    // Contact and trigger events, drained once after a step. These are intentionally
+    // no-op stubs for now: a deterministic implementation needs a PxSimulationEventCallback
+    // paired with a custom filter shader, and CreateSceneEx currently installs
+    // PxDefaultSimulationFilterShader, so wiring one in risks perturbing the determinism the
+    // rest of the layer is measured against. They exist and return zero so the managed
+    // gameplay host, which drains every tick, resolves and runs; a game that needs contacts
+    // uses a scene query for now. The dst pointers are typed void* here because the stub
+    // never writes through them; the managed side passes its own event-struct pointers.
+    PHYSX_WRAPPER_API PxU32 PxwWorldDrainContacts(pxw::PxwWorld* world, void* dst, PxU32 capacity);
+    PHYSX_WRAPPER_API PxU32 PxwWorldDrainTriggers(pxw::PxwWorld* world, void* dst, PxU32 capacity);
 
     // ------------------------------------------------------------------ mass ----
 

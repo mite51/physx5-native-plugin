@@ -1636,6 +1636,192 @@ namespace
 
 		body->release();
 	}
+
+	// The gameplay body API and scene queries were added on top of the determinism core.
+	// The most important thing these establish is that PxwWorldReadPoses uses the
+	// quaternion-first layout the managed SimTransform marshals into: a transposed pose
+	// is a silent corruption that no exception catches, only wrong-looking rendering.
+	void TestBodyApiAndReadPoseLayout()
+	{
+		std::printf("TestBodyApiAndReadPoseLayout\n");
+
+		PxwSceneDesc desc = MakeDeterministicSceneDesc();
+		PxwWorld* world = PxwWorldCreate(&desc);
+
+		PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+		PxMaterial* material = physics->createMaterial(0.6f, 0.5f, 0.1f);
+
+		PxBoxGeometry groundGeom(50.0f, 1.0f, 50.0f);
+		PxShape* groundShape = physics->createShape(groundGeom, *material, true);
+		PxRigidStatic* ground = physics->createRigidStatic(PxTransform(PxVec3(0.0f, -1.0f, 0.0f)));
+		ground->attachShape(*groundShape);
+		groundShape->release();
+		PxwWorldRegister(world, 1, ground, PxwHandleKind::eRIGID_STATIC);
+
+		PxBoxGeometry boxGeom(0.5f, 0.5f, 0.5f);
+		PxShape* boxShape = physics->createShape(boxGeom, *material, true);
+		PxRigidDynamic* box = physics->createRigidDynamic(PxTransform(PxVec3(0.0f, 5.0f, 0.0f)));
+		box->attachShape(*boxShape);
+		boxShape->release();
+		PxRigidBodyExt::updateMassAndInertia(*box, 10.0f);
+		PxwApplyDeterministicRigidDefaults(box, 8, 2);
+		PxwWorldRegister(world, 100, box, PxwHandleKind::eRIGID_DYNAMIC);
+
+		PxwWorldCommitPending(world);
+		material->release();
+
+		PxwPose pose;
+		PxwBodyGetPose(box, &pose);
+		Check(PxAbs(pose.ToPxTransform().p.y - 5.0f) < 1.0e-4f, "PxwBodyGetPose returns the body position");
+		Check(PxAbs(PxwBodyGetMass(box) - box->getMass()) < 1.0e-4f, "PxwBodyGetMass matches the actor mass");
+
+		// Teleport places the body and, like a restore, re-pins the wake counter so a
+		// pooled body spawns awake rather than inheriting the slot's sleep state.
+		const PxTransform target(PxVec3(1.0f, 8.0f, -2.0f),
+			PxQuat(0.4f, PxVec3(0.267261f, 0.534522f, 0.801784f)).getNormalized());
+		PxwPose targetPose(target);
+		const PxVec3 zero(0.0f);
+		PxwBodyTeleport(box, &targetPose, &zero, &zero);
+		Check(!box->isSleeping(), "a teleported body is awake");
+		Check(box->getWakeCounter() > 1.0e30f, "teleport pins the wake counter high");
+
+		PxwPoseEntry entries[2];
+		const PxU32 poseCount = PxwWorldReadPoses(world, entries, 2);
+		Check(poseCount == 2, "pose readback returns both entries");
+
+		const PxwPoseEntry* boxEntry = NULL;
+		for (PxU32 i = 0; i < poseCount; ++i)
+		{
+			if (entries[i].stableId == 100u)
+			{
+				boxEntry = &entries[i];
+			}
+		}
+		Check(boxEntry != NULL, "the dynamic body appears in the pose readback");
+		if (boxEntry != NULL)
+		{
+			const PxTransform live = box->getGlobalPose();
+			const PxTransform readback = boxEntry->pose.ToPxTransform();
+			Check(PxAbs(readback.p.x - live.p.x) < 1.0e-5f && PxAbs(readback.p.y - live.p.y) < 1.0e-5f &&
+				  PxAbs(readback.p.z - live.p.z) < 1.0e-5f,
+				"ReadPoses position matches the live pose");
+
+			// The layout fix itself: a managed SimTransform is quaternion-first, so the
+			// first four floats of the pose must be the quaternion and the next three the
+			// position. Reading them raw catches a transposed struct that ToPxTransform
+			// would hide.
+			const float* raw = reinterpret_cast<const float*>(&boxEntry->pose);
+			Check(raw[0] == live.q.x && raw[1] == live.q.y && raw[2] == live.q.z && raw[3] == live.q.w,
+				"ReadPoses lays the quaternion out first, matching SimTransform");
+			Check(raw[4] == live.p.x && raw[5] == live.p.y && raw[6] == live.p.z,
+				"ReadPoses lays the position after the quaternion, matching SimTransform");
+		}
+
+		const PxVec3 up(0.0f, 3.0f, 0.0f);
+		PxwBodySetLinearVelocity(box, &up);
+		PxVec3 readVel;
+		PxwBodyGetLinearVelocity(box, &readVel);
+		Check(PxAbs(readVel.y - 3.0f) < 1.0e-4f, "SetLinearVelocity then GetLinearVelocity round-trips");
+
+		PxwWorldDestroy(world);
+	}
+
+	// Queries must resolve every hit to a stable ID and return a deterministic order,
+	// since two peers iterating the same hits in a different order would desync.
+	void TestSceneQueries()
+	{
+		std::printf("TestSceneQueries\n");
+
+		PxwSceneDesc desc = MakeDeterministicSceneDesc();
+		PxwWorld* world = PxwWorldCreate(&desc);
+
+		PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+		PxMaterial* material = physics->createMaterial(0.6f, 0.5f, 0.1f);
+
+		PxBoxGeometry groundGeom(50.0f, 1.0f, 50.0f);
+		PxShape* groundShape = physics->createShape(groundGeom, *material, true);
+		PxRigidStatic* ground = physics->createRigidStatic(PxTransform(PxVec3(0.0f, -1.0f, 0.0f)));
+		ground->attachShape(*groundShape);
+		groundShape->release();
+		PxwWorldRegister(world, 1, ground, PxwHandleKind::eRIGID_STATIC);
+
+		// Two boxes on the same vertical column. The lower stable ID sits lower, so a ray
+		// from above hits the higher stable ID first: distance order is not ID order,
+		// which is what makes the sort worth testing.
+		for (int k = 0; k < 2; ++k)
+		{
+			const PxU32 id = 100u + static_cast<PxU32>(k);
+			const float y = (k == 0) ? 2.0f : 5.0f;
+			PxBoxGeometry g(0.5f, 0.5f, 0.5f);
+			PxShape* s = physics->createShape(g, *material, true);
+			PxRigidDynamic* b = physics->createRigidDynamic(PxTransform(PxVec3(0.0f, y, 0.0f)));
+			b->attachShape(*s);
+			s->release();
+			PxRigidBodyExt::updateMassAndInertia(*b, 10.0f);
+			PxwApplyDeterministicRigidDefaults(b, 8, 2);
+			PxwWorldRegister(world, id, b, PxwHandleKind::eRIGID_DYNAMIC);
+		}
+		PxwWorldCommitPending(world);
+		material->release();
+
+		PxVec3 origin(0.0f, 20.0f, 0.0f);
+		PxVec3 down(0.0f, -1.0f, 0.0f);
+		PxwRaycastHit hits[8];
+
+		const PxU32 n = PxwWorldRaycast(world, &origin, &down, 30.0f, 0u, hits, 8);
+		Check(n == 3u, "a downward ray hits both boxes and the ground");
+		Check(n >= 1u && hits[0].stableId == 101u, "the nearest hit is the top box, sorted by distance not stable ID");
+
+		bool ascending = true;
+		for (PxU32 i = 1; i < n; ++i)
+		{
+			if (hits[i].distance < hits[i - 1].distance)
+			{
+				ascending = false;
+			}
+		}
+		Check(ascending, "ray hits are sorted by ascending distance");
+
+		bool resolved = true;
+		for (PxU32 i = 0; i < n; ++i)
+		{
+			if (hits[i].stableId != 1u && hits[i].stableId != 100u && hits[i].stableId != 101u)
+			{
+				resolved = false;
+			}
+		}
+		Check(resolved, "every hit resolved to a registered stable ID");
+
+		// A direction that need not be normalised: the native side normalises it, so a
+		// longer vector must not change the reported distances.
+		PxVec3 downLong(0.0f, -4.0f, 0.0f);
+		PxwRaycastHit longHits[8];
+		const PxU32 nLong = PxwWorldRaycast(world, &origin, &downLong, 30.0f, 0u, longHits, 8);
+		Check(nLong == n && longHits[0].stableId == hits[0].stableId &&
+			PxAbs(longHits[0].distance - hits[0].distance) < 1.0e-4f,
+			"an unnormalised direction is normalised and does not change the hits");
+
+		const PxU32 nStatic = PxwWorldRaycast(world, &origin, &down, 30.0f,
+			1u << PxwHandleKind::eRIGID_STATIC, hits, 8);
+		Check(nStatic == 1u && hits[0].stableId == 1u, "a filter mask selecting statics returns only the ground");
+
+		const PxU32 nCapped = PxwWorldRaycast(world, &origin, &down, 30.0f, 0u, hits, 1);
+		Check(nCapped == 1u && hits[0].stableId == 101u, "capacity truncates to the nearest hit");
+
+		// An overlap sphere spanning both boxes must come back in ascending stable-ID
+		// order, since an overlap has no distance to order by.
+		PxVec3 center(0.0f, 3.5f, 0.0f);
+		PxVec3 halfExtents(0.0f);
+		PxQuat identity(PxIdentity);
+		PxwOverlapHit overlaps[8];
+		const PxU32 nOverlap = PxwWorldOverlap(world, PxwQueryShape::eSPHERE, &center, &halfExtents, 2.5f,
+			&identity, 0u, overlaps, 8);
+		Check(nOverlap == 2u, "an overlap sphere finds both boxes");
+		Check(nOverlap == 2u && overlaps[0].stableId == 100u && overlaps[1].stableId == 101u,
+			"overlap hits are sorted by ascending stable ID");
+
+		PxwWorldDestroy(world);
+	}
 }
 
 int main()
@@ -1669,6 +1855,12 @@ int main()
 	TestApplyMassIsVerbatim();
 	TestMassHashDetectsMismatch();
 	TestCollapsedMassKeepsPoseRoundTripExact();
+
+	// The gameplay body API and scene queries added on top of the core, including the
+	// quaternion-first pose layout the managed structs depend on.
+	std::printf("\n--- gameplay body api and scene queries ---\n");
+	TestBodyApiAndReadPoseLayout();
+	TestSceneQueries();
 
 	// Is a snapshot enough to reproduce a step exactly? No: PhysX warm-starts the
 	// solver from contact impulses held in the persistent manifolds, and nothing in

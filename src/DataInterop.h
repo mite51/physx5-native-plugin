@@ -35,6 +35,37 @@ namespace pxw
 
 	};
 
+	// Quaternion-first transform, laid out to match physx::PxTransform (PxQuat q; PxVec3 p;)
+	// and the managed UNDPWR SimTransform, which is quaternion-first for exactly that reason.
+	//
+	// PxwTransformData above is position-first and cannot be reordered without breaking the
+	// legacy PxwAPIs surface and its managed PxTransformData counterpart, which agree with
+	// each other. The UNDPWR interop structs that a snapshot never touches but that cross to
+	// managed code field-by-field (pose readback and the mass frame) use this type instead,
+	// so their bytes line up with SimTransform rather than being silently transposed.
+	struct PxwPose
+	{
+		PxQuat quaternion;
+		PxVec3 position;
+
+		PxwPose()
+		{
+			quaternion = PxQuat();
+			position = PxVec3();
+		}
+
+		PxwPose(PxTransform transform)
+		{
+			quaternion = transform.q;
+			position = transform.p;
+		}
+
+		PxTransform ToPxTransform() const
+		{
+			return PxTransform(position, quaternion);
+		}
+	};
+
 	// Bit flags for PxwSceneDesc::flags. Mirrors the subset of PxSceneFlag that the
 	// deterministic simulation framework needs to control from managed code, plus a
 	// plugin-specific flag to suppress the PVD connection attempt.

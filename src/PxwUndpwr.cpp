@@ -177,9 +177,51 @@ namespace pxw
 		PxReal sleepAngThresholdSq;
 		PxU32 sleepTicks;
 
+		// Reverse index from a scene actor pointer back to the identity every peer knows
+		// it by. PhysX reports a scene-query hit as a PxRigidActor*, but the registry is
+		// keyed by stable ID, so a query needs this to turn a hit into a stable ID and
+		// drop hits on actors it does not own. Rebuilt from the committed entries on every
+		// PxwWorldCommitPending; enabling or disabling an entry keeps the same actor
+		// pointer, so it does not need rebuilding there. Kept sorted by pointer so a hit
+		// resolves with a binary search rather than a scan of every registered body.
+		struct ActorLookup
+		{
+			PxRigidActor* actor;
+			PxU32 stableId;
+			PxU32 kind;
+		};
+		std::vector<ActorLookup> actorLookup;
+
 		PxwWorld()
 			: scene(NULL), simulating(false),
 			  sleepLinThresholdSq(0.0f), sleepAngThresholdSq(0.0f), sleepTicks(0) {}
+
+		// Resolves a scene actor to its stable ID and kind, or returns false when the
+		// actor is not one this world registered.
+		bool ResolveActor(PxRigidActor* actor, PxU32& stableId, PxU32& kind) const
+		{
+			size_t lo = 0;
+			size_t hi = actorLookup.size();
+			while (lo < hi)
+			{
+				size_t mid = lo + ((hi - lo) >> 1);
+				if (actorLookup[mid].actor < actor)
+				{
+					lo = mid + 1;
+				}
+				else
+				{
+					hi = mid;
+				}
+			}
+			if (lo < actorLookup.size() && actorLookup[lo].actor == actor)
+			{
+				stableId = actorLookup[lo].stableId;
+				kind = actorLookup[lo].kind;
+				return true;
+			}
+			return false;
+		}
 
 		// Index of stableId, or -1. Entries are sorted so this is a binary search.
 		PxI32 Find(PxU32 stableId) const
@@ -271,6 +313,83 @@ namespace pxw
 			}
 			default:
 				return NULL;
+			}
+		}
+
+		// Rebuilds the actor-to-stable-ID reverse index from the entries currently in the
+		// scene. Called after every commit, where the set of scene actors changes.
+		void RebuildActorLookup(PxwWorld& world)
+		{
+			world.actorLookup.clear();
+			for (size_t i = 0; i < world.entries.size(); ++i)
+			{
+				const PxwWorldEntry& e = world.entries[i];
+				if (!e.inScene)
+				{
+					continue;
+				}
+				PxRigidActor* actor = AsRigidActor(e);
+				if (actor == NULL)
+				{
+					continue;
+				}
+				PxwWorld::ActorLookup record;
+				record.actor = actor;
+				record.stableId = e.stableId;
+				record.kind = e.kind;
+				world.actorLookup.push_back(record);
+			}
+
+			std::sort(world.actorLookup.begin(), world.actorLookup.end(),
+				[](const PxwWorld::ActorLookup& a, const PxwWorld::ActorLookup& b)
+				{
+					return a.actor < b.actor;
+				});
+		}
+
+		// Largest number of touching hits a single query gathers before sorting and
+		// truncating to the caller's capacity. Hits beyond this are dropped, which is a
+		// deterministic outcome as long as every peer uses the same limit; it is set well
+		// above anything a normal scene produces from one query.
+		const PxU32 kMaxQueryTouches = 256u;
+
+		// Maps a managed SimForceMode onto PxForceMode. The enums share values by design,
+		// so this only clamps a malformed value onto eFORCE rather than translating.
+		inline PxForceMode::Enum ToForceMode(PxU32 mode)
+		{
+			switch (mode)
+			{
+			case PxForceMode::eIMPULSE:         return PxForceMode::eIMPULSE;
+			case PxForceMode::eVELOCITY_CHANGE: return PxForceMode::eVELOCITY_CHANGE;
+			case PxForceMode::eACCELERATION:    return PxForceMode::eACCELERATION;
+			case PxForceMode::eFORCE:
+			default:                            return PxForceMode::eFORCE;
+			}
+		}
+
+		// Builds the query geometry for an overlap or sweep from the managed shape enum.
+		// Returns false for an unknown shape. PxwQueryShape mirrors SimQueryShape: 0 sphere,
+		// 1 box, 2 capsule. A capsule's axis is PhysX's local X, as the SDK defines it.
+		inline bool BuildQueryGeometry(PxU32 shape, const PxVec3& halfExtents, PxReal radius,
+			PxSphereGeometry& sphere, PxBoxGeometry& box, PxCapsuleGeometry& capsule,
+			PxGeometry** out)
+		{
+			switch (shape)
+			{
+			case 0u: // sphere
+				sphere = PxSphereGeometry(radius);
+				*out = &sphere;
+				return true;
+			case 1u: // box
+				box = PxBoxGeometry(halfExtents.x, halfExtents.y, halfExtents.z);
+				*out = &box;
+				return true;
+			case 2u: // capsule
+				capsule = PxCapsuleGeometry(radius, halfExtents.y);
+				*out = &capsule;
+				return true;
+			default:
+				return false;
 			}
 		}
 
@@ -930,6 +1049,171 @@ void PxwApplyDeterministicRigidDefaults(PxRigidDynamic* actor, PxU32 positionIte
 	actor->setMaxDepenetrationVelocity(3.0f);
 }
 
+// -------------------------------------------------------- body gameplay I/O ----
+//
+// The reads and writes gameplay applies to a single body inside a step handler. They
+// take a PxActor* directly, which is the handle the registry stored, and forward to
+// the matching PxRigidBody / PxRigidActor call. See Documentation/NativeGameplayApi.md
+// in the managed package for the contract. A force applied here is accumulated by
+// PhysX and cleared on the next step, so a replayed step that applies the same force to
+// the same restored state reproduces the original; nothing else is needed to make them
+// deterministic, because the framework fixes the order the step handlers run in.
+
+void PxwBodyAddForce(PxActor* actor, const PxVec3* force, PxU32 mode)
+{
+	if (actor == NULL || force == NULL)
+	{
+		return;
+	}
+	PxRigidBody* body = actor->is<PxRigidBody>();
+	if (body == NULL || body->getScene() == NULL)
+	{
+		return;
+	}
+	if (body->getRigidBodyFlags() & PxRigidBodyFlag::eKINEMATIC)
+	{
+		return;
+	}
+	body->addForce(*force, ToForceMode(mode));
+}
+
+void PxwBodyAddTorque(PxActor* actor, const PxVec3* torque, PxU32 mode)
+{
+	if (actor == NULL || torque == NULL)
+	{
+		return;
+	}
+	PxRigidBody* body = actor->is<PxRigidBody>();
+	if (body == NULL || body->getScene() == NULL)
+	{
+		return;
+	}
+	if (body->getRigidBodyFlags() & PxRigidBodyFlag::eKINEMATIC)
+	{
+		return;
+	}
+	body->addTorque(*torque, ToForceMode(mode));
+}
+
+void PxwBodyGetPose(PxActor* actor, PxwPose* outPose)
+{
+	if (outPose == NULL)
+	{
+		return;
+	}
+	PxRigidActor* rigid = actor != NULL ? actor->is<PxRigidActor>() : NULL;
+	*outPose = PxwPose(rigid != NULL ? rigid->getGlobalPose() : PxTransform(PxIdentity));
+}
+
+void PxwBodyTeleport(PxActor* actor, const PxwPose* pose, const PxVec3* velocity, const PxVec3* angularVelocity)
+{
+	if (actor == NULL || pose == NULL)
+	{
+		return;
+	}
+	PxRigidActor* rigid = actor->is<PxRigidActor>();
+	if (rigid == NULL)
+	{
+		return;
+	}
+
+	// A placement, not a physical move: the pose is set directly rather than integrated,
+	// which is what bringing a pooled body into play needs.
+	rigid->setGlobalPose(pose->ToPxTransform(), false);
+
+	PxRigidDynamic* dynamic = rigid->is<PxRigidDynamic>();
+	if (dynamic == NULL)
+	{
+		return;
+	}
+	if (dynamic->getRigidBodyFlags() & PxRigidBodyFlag::eKINEMATIC)
+	{
+		return;
+	}
+
+	dynamic->setLinearVelocity(velocity != NULL ? *velocity : PxVec3(0.0f), false);
+	dynamic->setAngularVelocity(angularVelocity != NULL ? *angularVelocity : PxVec3(0.0f), false);
+	dynamic->clearForce(PxForceMode::eFORCE);
+	dynamic->clearForce(PxForceMode::eIMPULSE);
+	dynamic->clearTorque(PxForceMode::eFORCE);
+	dynamic->clearTorque(PxForceMode::eIMPULSE);
+
+	// Re-pin the wake counter the way a restore does, so a body brought out of a pool is
+	// awake and simulated rather than inheriting whatever sleep state the slot last held.
+	// A body only carries a wake counter while it is in a scene.
+	if (dynamic->getScene() != NULL)
+	{
+		dynamic->setWakeCounter(kNeverSleepWakeCounter);
+	}
+}
+
+void PxwBodyGetLinearVelocity(PxActor* actor, PxVec3* outVelocity)
+{
+	if (outVelocity == NULL)
+	{
+		return;
+	}
+	PxRigidBody* body = actor != NULL ? actor->is<PxRigidBody>() : NULL;
+	*outVelocity = body != NULL ? body->getLinearVelocity() : PxVec3(0.0f);
+}
+
+void PxwBodySetLinearVelocity(PxActor* actor, const PxVec3* velocity)
+{
+	if (actor == NULL || velocity == NULL)
+	{
+		return;
+	}
+	// The velocity setters live on PxRigidDynamic, not PxRigidBody: an articulation link
+	// is a body but its velocity is a solver output that cannot be written directly.
+	PxRigidDynamic* body = actor->is<PxRigidDynamic>();
+	if (body == NULL || body->getScene() == NULL)
+	{
+		return;
+	}
+	if (body->getRigidBodyFlags() & PxRigidBodyFlag::eKINEMATIC)
+	{
+		return;
+	}
+	// autowake false: waking a body that was asleep would change the simulation being
+	// driven; the framework owns wake state through its pinned wake counter.
+	body->setLinearVelocity(*velocity, false);
+}
+
+void PxwBodyGetAngularVelocity(PxActor* actor, PxVec3* outVelocity)
+{
+	if (outVelocity == NULL)
+	{
+		return;
+	}
+	PxRigidBody* body = actor != NULL ? actor->is<PxRigidBody>() : NULL;
+	*outVelocity = body != NULL ? body->getAngularVelocity() : PxVec3(0.0f);
+}
+
+void PxwBodySetAngularVelocity(PxActor* actor, const PxVec3* velocity)
+{
+	if (actor == NULL || velocity == NULL)
+	{
+		return;
+	}
+	// See PxwBodySetLinearVelocity: the setter is a PxRigidDynamic member.
+	PxRigidDynamic* body = actor->is<PxRigidDynamic>();
+	if (body == NULL || body->getScene() == NULL)
+	{
+		return;
+	}
+	if (body->getRigidBodyFlags() & PxRigidBodyFlag::eKINEMATIC)
+	{
+		return;
+	}
+	body->setAngularVelocity(*velocity, false);
+}
+
+float PxwBodyGetMass(PxActor* actor)
+{
+	PxRigidBody* body = actor != NULL ? actor->is<PxRigidBody>() : NULL;
+	return body != NULL ? body->getMass() : 0.0f;
+}
+
 // --------------------------------------------------------------------- mass ----
 
 namespace
@@ -1096,7 +1380,7 @@ PxI32 PxwComputeMassProperties(PxRigidBody* actor, PxReal density, PxReal isotro
 
 	out->mass = total.mass;
 	out->inertia = diagonal;
-	out->cMassLocalPose = PxwTransformData(PxTransform(total.centerOfMass, massFrame));
+	out->cMassLocalPose = PxwPose(PxTransform(total.centerOfMass, massFrame));
 	out->shapeCount = static_cast<PxU32>(props.size());
 
 	return PxwResult::eOK;
@@ -1169,7 +1453,7 @@ PxI32 PxwGetMassProperties(PxRigidBody* actor, PxwMassProperties* out)
 	*out = PxwMassProperties();
 	out->mass = actor->getMass();
 	out->inertia = actor->getMassSpaceInertiaTensor();
-	out->cMassLocalPose = PxwTransformData(actor->getCMassLocalPose());
+	out->cMassLocalPose = PxwPose(actor->getCMassLocalPose());
 	out->shapeCount = actor->getNbShapes();
 
 	const PxVec3& d = out->inertia;
@@ -1341,6 +1625,9 @@ PxI32 PxwWorldCommitPending(PxwWorld* world)
 			PinWakeCounter(entry);
 		}
 	}
+
+	// The scene actor set just changed, so the query reverse index is rebuilt to match.
+	RebuildActorLookup(*world);
 
 	return PxwResult::eOK;
 }
@@ -1815,7 +2102,7 @@ PxU32 PxwWorldReadPoses(PxwWorld* world, PxwPoseEntry* dst, PxU32 capacity)
 
 		dst[count].stableId = entry.stableId;
 		dst[count].kind = entry.kind;
-		dst[count].pose = PxwTransformData(pose);
+		dst[count].pose = PxwPose(pose);
 		++count;
 	}
 
@@ -1962,4 +2249,223 @@ PxU64 PxwHashBuffer(const void* src, PxU32 size)
 		return 0;
 	}
 	return FnvAccumulate(kFnvOffsetBasis, src, size);
+}
+
+// ------------------------------------------------------------- scene queries ----
+
+namespace
+{
+	// True when a hit on a body of the given kind passes the caller's filter. A zero mask
+	// matches everything; otherwise the mask is ANDed against a single bit per kind.
+	inline bool PassesFilter(PxU32 filterMask, PxU32 kind)
+	{
+		return filterMask == 0u || (filterMask & (1u << kind)) != 0u;
+	}
+
+	// Resolves, filters and sorts the touches from a raycast or sweep into the caller's
+	// buffer. PxRaycastHit and PxSweepHit share the fields this reads, so one template
+	// serves both. Hits on unregistered actors are dropped; the rest are sorted by
+	// distance then stable ID and truncated to capacity from the front.
+	template <typename HitT>
+	PxU32 EmitSortedLineHits(const PxwWorld& world, const HitT* touches, PxU32 touchCount,
+		PxU32 filterMask, PxwRaycastHit* hits, PxU32 capacity)
+	{
+		std::vector<PxwRaycastHit> resolved;
+		resolved.reserve(touchCount);
+
+		for (PxU32 i = 0; i < touchCount; ++i)
+		{
+			const HitT& t = touches[i];
+			PxU32 stableId = 0;
+			PxU32 kind = 0;
+			if (t.actor == NULL || !world.ResolveActor(t.actor, stableId, kind))
+			{
+				continue;
+			}
+			if (!PassesFilter(filterMask, kind))
+			{
+				continue;
+			}
+
+			PxwRaycastHit h;
+			h.stableId = stableId;
+			h.kind = kind;
+			h.point = t.position;
+			h.normal = t.normal;
+			h.distance = t.distance;
+			h.faceIndex = t.faceIndex;
+			resolved.push_back(h);
+		}
+
+		std::sort(resolved.begin(), resolved.end(),
+			[](const PxwRaycastHit& a, const PxwRaycastHit& b)
+			{
+				if (a.distance != b.distance)
+				{
+					return a.distance < b.distance;
+				}
+				return a.stableId < b.stableId;
+			});
+
+		PxU32 count = static_cast<PxU32>(resolved.size());
+		if (count > capacity)
+		{
+			count = capacity;
+		}
+		for (PxU32 i = 0; i < count; ++i)
+		{
+			hits[i] = resolved[i];
+		}
+		return count;
+	}
+}
+
+PxU32 PxwWorldRaycast(PxwWorld* world, const PxVec3* origin, const PxVec3* direction, PxReal maxDistance,
+	PxU32 filterMask, PxwRaycastHit* hits, PxU32 capacity)
+{
+	if (world == NULL || world->scene == NULL || origin == NULL || direction == NULL ||
+		hits == NULL || capacity == 0u || maxDistance <= 0.0f)
+	{
+		return 0;
+	}
+
+	PxVec3 unitDir = *direction;
+	const PxReal length = unitDir.magnitude();
+	if (length <= 0.0f)
+	{
+		return 0;
+	}
+	unitDir /= length;
+
+	PxRaycastHit touches[kMaxQueryTouches];
+	PxRaycastBuffer buffer(touches, kMaxQueryTouches);
+	const PxHitFlags hitFlags = PxHitFlag::ePOSITION | PxHitFlag::eNORMAL | PxHitFlag::eFACE_INDEX;
+	// eNO_BLOCK turns every hit into a touch, so the whole set is gathered and then sorted
+	// here rather than letting PhysX pick a single blocking hit in an unspecified order.
+	const PxQueryFilterData filterData(PxQueryFlags(PxQueryFlag::eSTATIC | PxQueryFlag::eDYNAMIC | PxQueryFlag::eNO_BLOCK));
+
+	world->scene->raycast(*origin, unitDir, maxDistance, buffer, hitFlags, filterData);
+
+	return EmitSortedLineHits(*world, buffer.touches, buffer.nbTouches, filterMask, hits, capacity);
+}
+
+PxU32 PxwWorldOverlap(PxwWorld* world, PxU32 shape, const PxVec3* center, const PxVec3* halfExtents, PxReal radius,
+	const PxQuat* rotation, PxU32 filterMask, PxwOverlapHit* hits, PxU32 capacity)
+{
+	if (world == NULL || world->scene == NULL || center == NULL || hits == NULL || capacity == 0u)
+	{
+		return 0;
+	}
+
+	const PxVec3 extents = halfExtents != NULL ? *halfExtents : PxVec3(0.0f);
+	PxSphereGeometry sphere(1.0f);
+	PxBoxGeometry box(1.0f, 1.0f, 1.0f);
+	PxCapsuleGeometry capsule(1.0f, 1.0f);
+	PxGeometry* geometry = NULL;
+	if (!BuildQueryGeometry(shape, extents, radius, sphere, box, capsule, &geometry))
+	{
+		return 0;
+	}
+
+	const PxQuat q = rotation != NULL ? *rotation : PxQuat(PxIdentity);
+	const PxTransform pose(*center, q);
+
+	PxOverlapHit touches[kMaxQueryTouches];
+	PxOverlapBuffer buffer(touches, kMaxQueryTouches);
+	const PxQueryFilterData filterData(PxQueryFlags(PxQueryFlag::eSTATIC | PxQueryFlag::eDYNAMIC | PxQueryFlag::eNO_BLOCK));
+
+	world->scene->overlap(*geometry, pose, buffer, filterData);
+
+	std::vector<PxwOverlapHit> resolved;
+	resolved.reserve(buffer.nbTouches);
+	for (PxU32 i = 0; i < buffer.nbTouches; ++i)
+	{
+		const PxOverlapHit& t = buffer.touches[i];
+		PxU32 stableId = 0;
+		PxU32 kind = 0;
+		if (t.actor == NULL || !world->ResolveActor(t.actor, stableId, kind))
+		{
+			continue;
+		}
+		if (!PassesFilter(filterMask, kind))
+		{
+			continue;
+		}
+		PxwOverlapHit h;
+		h.stableId = stableId;
+		h.kind = kind;
+		resolved.push_back(h);
+	}
+
+	std::sort(resolved.begin(), resolved.end(),
+		[](const PxwOverlapHit& a, const PxwOverlapHit& b)
+		{
+			return a.stableId < b.stableId;
+		});
+
+	PxU32 count = static_cast<PxU32>(resolved.size());
+	if (count > capacity)
+	{
+		count = capacity;
+	}
+	for (PxU32 i = 0; i < count; ++i)
+	{
+		hits[i] = resolved[i];
+	}
+	return count;
+}
+
+PxU32 PxwWorldSweep(PxwWorld* world, PxU32 shape, const PxVec3* origin, const PxVec3* halfExtents, PxReal radius,
+	const PxQuat* rotation, const PxVec3* direction, PxReal maxDistance,
+	PxU32 filterMask, PxwRaycastHit* hits, PxU32 capacity)
+{
+	if (world == NULL || world->scene == NULL || origin == NULL || direction == NULL ||
+		hits == NULL || capacity == 0u || maxDistance <= 0.0f)
+	{
+		return 0;
+	}
+
+	const PxVec3 extents = halfExtents != NULL ? *halfExtents : PxVec3(0.0f);
+	PxSphereGeometry sphere(1.0f);
+	PxBoxGeometry box(1.0f, 1.0f, 1.0f);
+	PxCapsuleGeometry capsule(1.0f, 1.0f);
+	PxGeometry* geometry = NULL;
+	if (!BuildQueryGeometry(shape, extents, radius, sphere, box, capsule, &geometry))
+	{
+		return 0;
+	}
+
+	PxVec3 unitDir = *direction;
+	const PxReal length = unitDir.magnitude();
+	if (length <= 0.0f)
+	{
+		return 0;
+	}
+	unitDir /= length;
+
+	const PxQuat q = rotation != NULL ? *rotation : PxQuat(PxIdentity);
+	const PxTransform pose(*origin, q);
+
+	PxSweepHit touches[kMaxQueryTouches];
+	PxSweepBuffer buffer(touches, kMaxQueryTouches);
+	const PxHitFlags hitFlags = PxHitFlag::ePOSITION | PxHitFlag::eNORMAL | PxHitFlag::eFACE_INDEX;
+	const PxQueryFilterData filterData(PxQueryFlags(PxQueryFlag::eSTATIC | PxQueryFlag::eDYNAMIC | PxQueryFlag::eNO_BLOCK));
+
+	world->scene->sweep(*geometry, pose, unitDir, maxDistance, buffer, hitFlags, filterData);
+
+	return EmitSortedLineHits(*world, buffer.touches, buffer.nbTouches, filterMask, hits, capacity);
+}
+
+// --------------------------------------------------------- contact draining ----
+
+PxU32 PxwWorldDrainContacts(PxwWorld* /*world*/, void* /*dst*/, PxU32 /*capacity*/)
+{
+	// Intentional no-op: no PxSimulationEventCallback is installed, so there is nothing to
+	// drain. Present so the managed host's per-tick drain resolves. See the header.
+	return 0;
+}
+
+PxU32 PxwWorldDrainTriggers(PxwWorld* /*world*/, void* /*dst*/, PxU32 /*capacity*/)
+{
+	return 0;
 }
