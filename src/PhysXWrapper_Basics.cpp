@@ -7,6 +7,34 @@
 
 namespace pxw
 {
+	// The default filter shader with contact and trigger notifications ORed on. It changes
+	// no collision or solve decision: for a solid pair it delegates to the default and only
+	// adds report flags, and for a trigger pair it applies the standard trigger behaviour.
+	// A scene built with this therefore simulates identically to one built with
+	// PxDefaultSimulationFilterShader, which is what lets contact reporting be added to the
+	// deterministic runtime without moving the measured numbers. Reporting only happens when
+	// a scene also has a simulation event callback set; the flags alone are inert.
+	static PxFilterFlags UndpwrEventFilterShader(
+		PxFilterObjectAttributes attributes0, PxFilterData filterData0,
+		PxFilterObjectAttributes attributes1, PxFilterData filterData1,
+		PxPairFlags& pairFlags, const void* constantBlock, PxU32 constantBlockSize)
+	{
+		if (PxFilterObjectIsTrigger(attributes0) || PxFilterObjectIsTrigger(attributes1))
+		{
+			// Triggers have no contact points to solve or report; the default trigger
+			// behaviour already reports found and lost.
+			pairFlags = PxPairFlag::eTRIGGER_DEFAULT;
+			return PxFilterFlag::eDEFAULT;
+		}
+
+		const PxFilterFlags flags = PxDefaultSimulationFilterShader(
+			attributes0, filterData0, attributes1, filterData1, pairFlags, constantBlock, constantBlockSize);
+		pairFlags |= PxPairFlag::eNOTIFY_TOUCH_FOUND
+			| PxPairFlag::eNOTIFY_TOUCH_PERSISTS
+			| PxPairFlag::eNOTIFY_CONTACT_POINTS;
+		return flags;
+	}
+
 	PhysXWrapper::PhysXWrapper()
 	{
 		mFoundation = NULL;
@@ -161,7 +189,9 @@ namespace pxw
 		PxSceneDesc sceneDesc(mPhysics->getTolerancesScale());
 		sceneDesc.gravity = desc.gravity;
 		sceneDesc.cpuDispatcher = GetOrCreateDispatcher(desc.cpuWorkerThreads);
-		sceneDesc.filterShader = PxDefaultSimulationFilterShader;
+		sceneDesc.filterShader = (desc.flags & PxwSceneFlag::eENABLE_CONTACT_EVENTS)
+			? UndpwrEventFilterShader
+			: PxDefaultSimulationFilterShader;
 		sceneDesc.staticStructure = (PxPruningStructureType::Enum)desc.pruningStructureType;
 		sceneDesc.solverType = (PxSolverType::Enum)desc.solverType;
 		sceneDesc.bounceThresholdVelocity = desc.bounceThresholdVelocity;

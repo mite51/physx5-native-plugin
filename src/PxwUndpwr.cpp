@@ -162,6 +162,109 @@ namespace pxw
 		}
 	};
 
+	// Collects the contact and trigger events a step produces. It only stores what PhysX
+	// reported, keyed by actor pointer; resolution to stable IDs and the deterministic
+	// ordering happen at drain time, because the raw report order follows PhysX's internal
+	// pair bookkeeping and is not something a peer or a replay can reproduce. Cleared at the
+	// start of each simulate, so it holds exactly one step's events when the drain runs.
+	class WorldEventCallback : public PxSimulationEventCallback
+	{
+	public:
+		struct RawContact
+		{
+			PxRigidActor* actor0;
+			PxRigidActor* actor1;
+			PxVec3 point;    // representative world-space point
+			PxVec3 normal;   // as PhysX reports it: from actor1 toward actor0
+			PxReal impulse;  // total normal impulse over the pair's points
+		};
+		struct RawTrigger
+		{
+			PxRigidActor* trigger;
+			PxRigidActor* other;
+			PxU32 status;    // a PxwTriggerStatus
+		};
+
+		std::vector<RawContact> contacts;
+		std::vector<RawTrigger> triggers;
+
+		void Clear()
+		{
+			contacts.clear();
+			triggers.clear();
+		}
+
+		void onContact(const PxContactPairHeader& header, const PxContactPair* pairs, PxU32 count) override
+		{
+			for (PxU32 i = 0; i < count; ++i)
+			{
+				const PxContactPair& pair = pairs[i];
+				if (!(pair.events & (PxPairFlag::eNOTIFY_TOUCH_FOUND | PxPairFlag::eNOTIFY_TOUCH_PERSISTS)))
+				{
+					continue;
+				}
+				// A shape removed mid-step leaves an actor pointer that no longer resolves,
+				// so there is nothing a peer could agree on; drop it.
+				if (pair.flags & (PxContactPairFlag::eREMOVED_SHAPE_0 | PxContactPairFlag::eREMOVED_SHAPE_1))
+				{
+					continue;
+				}
+
+				RawContact rc;
+				rc.actor0 = static_cast<PxRigidActor*>(header.actors[0]);
+				rc.actor1 = static_cast<PxRigidActor*>(header.actors[1]);
+				rc.point = PxVec3(0.0f);
+				rc.normal = PxVec3(0.0f);
+				rc.impulse = 0.0f;
+
+				PxContactPairPoint points[64];
+				const PxU32 n = pair.extractContacts(points, 64);
+				if (n > 0)
+				{
+					rc.point = points[0].position;
+					rc.normal = points[0].normal;
+					PxReal imp = 0.0f;
+					for (PxU32 p = 0; p < n; ++p)
+					{
+						// impulse is stored as normal * scalar, so the projection onto the
+						// unit normal recovers the scalar normal impulse.
+						imp += points[p].impulse.dot(points[p].normal);
+					}
+					rc.impulse = imp;
+				}
+				contacts.push_back(rc);
+			}
+		}
+
+		void onTrigger(PxTriggerPair* pairs, PxU32 count) override
+		{
+			for (PxU32 i = 0; i < count; ++i)
+			{
+				const PxTriggerPair& tp = pairs[i];
+				if (tp.flags & (PxTriggerPairFlag::eREMOVED_SHAPE_TRIGGER | PxTriggerPairFlag::eREMOVED_SHAPE_OTHER))
+				{
+					continue;
+				}
+				if (tp.status != PxPairFlag::eNOTIFY_TOUCH_FOUND && tp.status != PxPairFlag::eNOTIFY_TOUCH_LOST)
+				{
+					continue;
+				}
+
+				RawTrigger rt;
+				rt.trigger = static_cast<PxRigidActor*>(tp.triggerActor);
+				rt.other = static_cast<PxRigidActor*>(tp.otherActor);
+				rt.status = (tp.status == PxPairFlag::eNOTIFY_TOUCH_FOUND)
+					? (PxU32)PxwTriggerStatus::eFOUND : (PxU32)PxwTriggerStatus::eLOST;
+				triggers.push_back(rt);
+			}
+		}
+
+		void onConstraintBreak(PxConstraintInfo*, PxU32) override {}
+		void onWake(PxActor**, PxU32) override {}
+		void onSleep(PxActor**, PxU32) override {}
+		void onAdvance(const PxRigidBody* const*, const PxTransform*, const PxU32) override {}
+	};
+
 	class PxwWorld
 	{
 	public:
@@ -169,6 +272,12 @@ namespace pxw
 		std::vector<PxwWorldEntry> entries;
 		bool simulating;
 		std::vector<PxU8> scratch;
+		WorldEventCallback events;
+
+		// Reused resolve-and-sort buffers for the contact and trigger drains, so a drain
+		// does not allocate on every step.
+		std::vector<PxwContactEvent> contactScratch;
+		std::vector<PxwTriggerEvent> triggerScratch;
 
 		// Framework sleep parameters. Thresholds are stored squared, to compare
 		// against magnitudeSquared() without a root. sleepTicks of 0 disables
@@ -1494,7 +1603,13 @@ PxwWorld* PxwWorldCreate(const PxwSceneDesc* desc)
 		return NULL;
 	}
 
-	PxScene* scene = GetGlobalPhysXWrapper().CreateSceneEx(*desc);
+	// Force the notification-adding filter shader on for every world, so the event callback
+	// below has contacts and triggers to collect. The shader changes no collision or solve
+	// decision, so this does not affect the simulation the rest of the layer is measured on.
+	PxwSceneDesc sceneDesc = *desc;
+	sceneDesc.flags |= PxwSceneFlag::eENABLE_CONTACT_EVENTS;
+
+	PxScene* scene = GetGlobalPhysXWrapper().CreateSceneEx(sceneDesc);
 	if (scene == NULL)
 	{
 		return NULL;
@@ -1502,6 +1617,7 @@ PxwWorld* PxwWorldCreate(const PxwSceneDesc* desc)
 
 	PxwWorld* world = new PxwWorld();
 	world->scene = scene;
+	scene->setSimulationEventCallback(&world->events);
 	return world;
 }
 
@@ -1719,6 +1835,9 @@ void PxwWorldSimulate(PxwWorld* world, PxReal dt)
 		return;
 	}
 	world->simulating = true;
+	// Contacts and triggers are reported during fetchResults; clear the buffers here so
+	// they hold exactly this step's events when the drain runs afterwards.
+	world->events.Clear();
 	PxwSceneSimulate(world->scene, dt);
 }
 
@@ -2479,14 +2598,103 @@ PxU32 PxwWorldSweep(PxwWorld* world, PxU32 shape, const PxVec3* origin, const Px
 
 // --------------------------------------------------------- contact draining ----
 
-PxU32 PxwWorldDrainContacts(PxwWorld* /*world*/, void* /*dst*/, PxU32 /*capacity*/)
+namespace
 {
-	// Intentional no-op: no PxSimulationEventCallback is installed, so there is nothing to
-	// drain. Present so the managed host's per-tick drain resolves. See the header.
-	return 0;
+	bool ContactEventLess(const PxwContactEvent& x, const PxwContactEvent& y)
+	{
+		if (x.idA != y.idA) { return x.idA < y.idA; }
+		return x.idB < y.idB;
+	}
+
+	bool TriggerEventLess(const PxwTriggerEvent& x, const PxwTriggerEvent& y)
+	{
+		if (x.triggerId != y.triggerId) { return x.triggerId < y.triggerId; }
+		return x.otherId < y.otherId;
+	}
 }
 
-PxU32 PxwWorldDrainTriggers(PxwWorld* /*world*/, void* /*dst*/, PxU32 /*capacity*/)
+PxU32 PxwWorldDrainContacts(PxwWorld* world, PxwContactEvent* dst, PxU32 capacity)
 {
-	return 0;
+	if (world == NULL || dst == NULL || capacity == 0)
+	{
+		return 0;
+	}
+
+	std::vector<PxwContactEvent>& out = world->contactScratch;
+	out.clear();
+	out.reserve(world->events.contacts.size());
+
+	for (size_t i = 0; i < world->events.contacts.size(); ++i)
+	{
+		const WorldEventCallback::RawContact& rc = world->events.contacts[i];
+		PxU32 id0 = 0, id1 = 0, kind0 = 0, kind1 = 0;
+		if (rc.actor0 == NULL || rc.actor1 == NULL) { continue; }
+		if (!world->ResolveActor(rc.actor0, id0, kind0)) { continue; }
+		if (!world->ResolveActor(rc.actor1, id1, kind1)) { continue; }
+		if (id0 == id1) { continue; }
+
+		PxwContactEvent ev;
+		ev.point = rc.point;
+		ev.impulse = rc.impulse;
+		// PhysX orients the reported normal from actor1 toward actor0. The output normal
+		// must point from A (the smaller stable ID) toward B, so flip when A is actor0.
+		if (id0 < id1)
+		{
+			ev.idA = id0;
+			ev.idB = id1;
+			ev.normal = -rc.normal;
+		}
+		else
+		{
+			ev.idA = id1;
+			ev.idB = id0;
+			ev.normal = rc.normal;
+		}
+		out.push_back(ev);
+	}
+
+	std::sort(out.begin(), out.end(), ContactEventLess);
+
+	const PxU32 n = (capacity < out.size()) ? capacity : static_cast<PxU32>(out.size());
+	for (PxU32 i = 0; i < n; ++i)
+	{
+		dst[i] = out[i];
+	}
+	return n;
+}
+
+PxU32 PxwWorldDrainTriggers(PxwWorld* world, PxwTriggerEvent* dst, PxU32 capacity)
+{
+	if (world == NULL || dst == NULL || capacity == 0)
+	{
+		return 0;
+	}
+
+	std::vector<PxwTriggerEvent>& out = world->triggerScratch;
+	out.clear();
+	out.reserve(world->events.triggers.size());
+
+	for (size_t i = 0; i < world->events.triggers.size(); ++i)
+	{
+		const WorldEventCallback::RawTrigger& rt = world->events.triggers[i];
+		PxU32 triggerId = 0, otherId = 0, kindT = 0, kindO = 0;
+		if (rt.trigger == NULL || rt.other == NULL) { continue; }
+		if (!world->ResolveActor(rt.trigger, triggerId, kindT)) { continue; }
+		if (!world->ResolveActor(rt.other, otherId, kindO)) { continue; }
+
+		PxwTriggerEvent ev;
+		ev.triggerId = triggerId;
+		ev.otherId = otherId;
+		ev.status = rt.status;
+		out.push_back(ev);
+	}
+
+	std::sort(out.begin(), out.end(), TriggerEventLess);
+
+	const PxU32 n = (capacity < out.size()) ? capacity : static_cast<PxU32>(out.size());
+	for (PxU32 i = 0; i < n; ++i)
+	{
+		dst[i] = out[i];
+	}
+	return n;
 }

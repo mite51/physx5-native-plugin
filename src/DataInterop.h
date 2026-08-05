@@ -79,7 +79,13 @@ namespace pxw
 			eENABLE_ACTIVE_ACTORS = 1u << 3,
 			eENABLE_ENHANCED_DETERMINISM = 1u << 4,
 			eENABLE_DIRECT_GPU_API = 1u << 5,
-			eDISABLE_PVD = 1u << 6
+			eDISABLE_PVD = 1u << 6,
+
+			// Install the notification-adding filter shader so a simulation event callback
+			// can collect contact and trigger events. Only adds report flags; it changes no
+			// collision or solve decision, so a scene simulates identically with it on. The
+			// UNDPWR world layer forces this on for every world it creates.
+			eENABLE_CONTACT_EVENTS = 1u << 7
 		};
 	};
 

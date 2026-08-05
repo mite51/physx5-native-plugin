@@ -74,9 +74,10 @@ namespace
 	// piece of simulation state that survives a step and is not part of any snapshot.
 	bool gUsePcm = true;
 
-	// Set by the articulation runs, which ask the same questions of both solvers. TGS
-	// is the framework default; PGS is the candidate for an adaptive rollback depth,
-	// because it is the only one measured to make replay transparent.
+	// Set by the articulation runs, which ask the same questions of both solvers. PGS is
+	// the framework default after the Phase 1 decision, because it is the one measured to
+	// make replay transparent to varying rollback depth; TGS stays available for a strictly
+	// fixed-horizon session.
 	PxSolverType::Enum gSolverType = PxSolverType::eTGS;
 
 	const char* SolverName()
@@ -1774,6 +1775,181 @@ namespace
 		material->release();
 	}
 
+	// Contact events must resolve to stable IDs, normalise to idA < idB with the normal
+	// oriented A toward B, sort by the ID pair, and -- because SimGameHost drains on replay
+	// ticks too -- produce the same sorted set when a tick is replayed. A stack of two boxes
+	// on the ground exercises all of it: a ground-box contact and a box-box contact, whose
+	// normals point opposite ways once normalised.
+	void TestContactEvents()
+	{
+		std::printf("TestContactEvents\n");
+
+		PxwSceneDesc desc = MakeDeterministicSceneDesc();
+		PxwWorld* world = PxwWorldCreate(&desc);
+
+		PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+		PxMaterial* material = physics->createMaterial(0.6f, 0.5f, 0.1f);
+
+		PxShape* groundShape = physics->createShape(PxBoxGeometry(50.0f, 1.0f, 50.0f), *material, true);
+		PxRigidStatic* ground = physics->createRigidStatic(PxTransform(PxVec3(0.0f, -1.0f, 0.0f)));
+		ground->attachShape(*groundShape);
+		groundShape->release();
+		PxwWorldRegister(world, 1, ground, PxwHandleKind::eRIGID_STATIC);
+
+		// Box A (id 100) rests on the ground; box B (id 50) rests on A. B's id is smaller,
+		// so the box-box pair normalises to idA = 50, idB = 100.
+		PxShape* boxShape = physics->createShape(PxBoxGeometry(0.5f, 0.5f, 0.5f), *material, true);
+		PxRigidDynamic* boxA = physics->createRigidDynamic(PxTransform(PxVec3(0.0f, 0.5f, 0.0f)));
+		boxA->attachShape(*boxShape);
+		PxRigidBodyExt::updateMassAndInertia(*boxA, 10.0f);
+		PxwApplyDeterministicRigidDefaults(boxA, 8, 2);
+		PxwWorldRegister(world, 100, boxA, PxwHandleKind::eRIGID_DYNAMIC);
+
+		PxRigidDynamic* boxB = physics->createRigidDynamic(PxTransform(PxVec3(0.0f, 1.5f, 0.0f)));
+		boxB->attachShape(*boxShape);
+		boxShape->release();
+		PxRigidBodyExt::updateMassAndInertia(*boxB, 10.0f);
+		PxwApplyDeterministicRigidDefaults(boxB, 8, 2);
+		PxwWorldRegister(world, 50, boxB, PxwHandleKind::eRIGID_DYNAMIC);
+
+		PxwWorldCommitPending(world);
+		material->release();
+
+		// Settle so the stack is in persistent contact.
+		for (int i = 0; i < 60; ++i) { PxwWorldStep(world, kDt); }
+
+		PxwContactEvent events[32];
+		const PxU32 count = PxwWorldDrainContacts(world, events, 32);
+		Check(count >= 2, "a settled two-box stack reports at least the ground and box-box contacts");
+
+		bool sorted = true;
+		bool normalised = true;
+		for (PxU32 i = 0; i < count; ++i)
+		{
+			if (events[i].idA >= events[i].idB) { normalised = false; }
+			if (i > 0 && !(events[i - 1].idA < events[i].idA ||
+				(events[i - 1].idA == events[i].idA && events[i - 1].idB <= events[i].idB)))
+			{
+				sorted = false;
+			}
+		}
+		Check(normalised, "every contact is normalised to idA < idB");
+		Check(sorted, "contacts are sorted by (idA, idB)");
+
+		// Find the two contacts and check the normal orientation. Ground (1) -> box A (100)
+		// points up; box B top (50) -> box A bottom (100) points down.
+		const PxwContactEvent* groundBox = NULL;
+		const PxwContactEvent* boxBox = NULL;
+		for (PxU32 i = 0; i < count; ++i)
+		{
+			if (events[i].idA == 1u && events[i].idB == 100u) { groundBox = &events[i]; }
+			if (events[i].idA == 50u && events[i].idB == 100u) { boxBox = &events[i]; }
+		}
+		Check(groundBox != NULL && groundBox->normal.y > 0.9f,
+			"the ground-to-box normal points from A (ground) up toward B (box)");
+		Check(boxBox != NULL && boxBox->normal.y < -0.9f,
+			"the box-to-box normal points from A (upper box) down toward B (lower box)");
+
+		// Truncation keeps the front of the sorted list: the smallest pair, (1, 100).
+		PxwContactEvent one[1];
+		const PxU32 truncated = PxwWorldDrainContacts(world, one, 1);
+		Check(truncated == 1 && one[0].idA == 1u && one[0].idB == 100u,
+			"capacity truncates to the front of the sorted list");
+
+		// A replayed tick must produce the same sorted event set. Capture, step and drain
+		// once, then restore and step the same tick again and drain: the two sets match.
+		std::vector<PxU8> snapshot(PxwWorldStateSize(world));
+		PxU64 hash = 0;
+		const PxU32 written = PxwWorldCaptureState(world, snapshot.data(), static_cast<PxU32>(snapshot.size()), &hash);
+		snapshot.resize(written);
+
+		PxwWorldStep(world, kDt);
+		PxwContactEvent first[32];
+		const PxU32 firstCount = PxwWorldDrainContacts(world, first, 32);
+
+		PxwWorldRestoreState(world, snapshot.data(), static_cast<PxU32>(snapshot.size()));
+		PxwWorldStep(world, kDt);
+		PxwContactEvent replay[32];
+		const PxU32 replayCount = PxwWorldDrainContacts(world, replay, 32);
+
+		bool pairsMatch = (firstCount == replayCount);
+		bool geometryMatches = pairsMatch;
+		for (PxU32 i = 0; i < firstCount && pairsMatch; ++i)
+		{
+			if (first[i].idA != replay[i].idA || first[i].idB != replay[i].idB) { pairsMatch = false; }
+			if (std::memcmp(&first[i].point, &replay[i].point, sizeof(PxVec3)) != 0 ||
+				std::memcmp(&first[i].normal, &replay[i].normal, sizeof(PxVec3)) != 0 ||
+				first[i].impulse != replay[i].impulse) { geometryMatches = false; }
+		}
+		// The determinism-relevant property: the same contacts, normalised and in the same
+		// order. This is what gameplay may branch its hashed state on.
+		Check(pairsMatch, "a replayed tick produces the same sorted contact set");
+		// The point, normal and impulse are derived from solver warm-start state, which the
+		// snapshot deliberately does not carry, so they are only approximate across a
+		// cold restore -- the same "as close as possible, not bit-exact" property the pose
+		// replay has. Recorded, not asserted; gameplay must not branch hashed state on them.
+		Observe(geometryMatches, "a replayed tick reproduces contact point, normal and impulse bit-for-bit");
+
+		PxwWorldDestroy(world);
+	}
+
+	// A trigger volume reports a Found when a body enters and a Lost when it leaves, each
+	// resolved to the two stable IDs, sorted by (triggerId, otherId). A box falling through
+	// a static trigger produces exactly that pair over its passage.
+	void TestTriggerEvents()
+	{
+		std::printf("TestTriggerEvents\n");
+
+		PxwSceneDesc desc = MakeDeterministicSceneDesc();
+		PxwWorld* world = PxwWorldCreate(&desc);
+
+		PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+		PxMaterial* material = physics->createMaterial(0.6f, 0.5f, 0.1f);
+
+		// A static trigger box (id 2), centred at y = 5, spanning y in [4, 6].
+		PxShape* triggerShape = physics->createShape(PxBoxGeometry(1.0f, 1.0f, 1.0f), *material, false);
+		triggerShape->setFlag(PxShapeFlag::eSIMULATION_SHAPE, false);
+		triggerShape->setFlag(PxShapeFlag::eTRIGGER_SHAPE, true);
+		PxRigidStatic* trigger = physics->createRigidStatic(PxTransform(PxVec3(0.0f, 5.0f, 0.0f)));
+		trigger->attachShape(*triggerShape);
+		triggerShape->release();
+		PxwWorldRegister(world, 2, trigger, PxwHandleKind::eRIGID_STATIC);
+
+		// A dynamic box (id 200) starting above the trigger, falling straight through it.
+		PxShape* boxShape = physics->createShape(PxBoxGeometry(0.5f, 0.5f, 0.5f), *material, true);
+		PxRigidDynamic* box = physics->createRigidDynamic(PxTransform(PxVec3(0.0f, 9.0f, 0.0f)));
+		box->attachShape(*boxShape);
+		boxShape->release();
+		PxRigidBodyExt::updateMassAndInertia(*box, 10.0f);
+		PxwApplyDeterministicRigidDefaults(box, 8, 2);
+		PxwWorldRegister(world, 200, box, PxwHandleKind::eRIGID_DYNAMIC);
+
+		PxwWorldCommitPending(world);
+		material->release();
+
+		bool sawFound = false;
+		bool sawLost = false;
+		bool idsCorrect = true;
+		for (int i = 0; i < 120; ++i)
+		{
+			PxwWorldStep(world, kDt);
+			PxwTriggerEvent triggers[8];
+			const PxU32 n = PxwWorldDrainTriggers(world, triggers, 8);
+			for (PxU32 t = 0; t < n; ++t)
+			{
+				if (triggers[t].triggerId != 2u || triggers[t].otherId != 200u) { idsCorrect = false; }
+				if (triggers[t].status == static_cast<PxU32>(PxwTriggerStatus::eFOUND)) { sawFound = true; }
+				if (triggers[t].status == static_cast<PxU32>(PxwTriggerStatus::eLOST)) { sawLost = true; }
+			}
+		}
+
+		Check(sawFound, "a body entering a trigger volume reports a Found event");
+		Check(sawLost, "a body leaving a trigger volume reports a Lost event");
+		Check(idsCorrect, "trigger events resolve to the trigger and the other body's stable IDs");
+
+		PxwWorldDestroy(world);
+	}
+
 	// Queries must resolve every hit to a stable ID and return a deterministic order,
 	// since two peers iterating the same hits in a different order would desync.
 	void TestSceneQueries()
@@ -2274,6 +2450,8 @@ int main()
 	std::printf("\n--- gameplay body api and scene queries ---\n");
 	TestBodyApiAndReadPoseLayout();
 	TestDeterministicRigidDefaults();
+	TestContactEvents();
+	TestTriggerEvents();
 	TestSceneQueries();
 
 	// Is a snapshot enough to reproduce a step exactly? No: PhysX warm-starts the

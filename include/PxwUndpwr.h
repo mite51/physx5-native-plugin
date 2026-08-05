@@ -179,6 +179,46 @@ namespace pxw
         PxU32 kind;
     };
 
+    /// One contact reported after a step, resolved to the two stable IDs in contact.
+    /// Laid out to match the managed SimContactEvent field-for-field (36 bytes), since
+    /// arrays of these cross the interop boundary directly.
+    ///
+    /// PhysX reports contacts in the order of its internal pair bookkeeping, which is
+    /// exactly the state a snapshot cannot carry, so the raw order differs between peers
+    /// and between an original pass and its replay. PxwWorldDrainContacts normalises each
+    /// pair to ascending stable-ID order (idA < idB) with the normal oriented from A toward
+    /// B, then sorts the whole buffer by (idA, idB), so gameplay sees the same events in
+    /// the same order everywhere.
+    struct PxwContactEvent
+    {
+        PxU32 idA;        //!< The smaller of the two stable IDs.
+        PxU32 idB;        //!< The larger of the two stable IDs.
+        PxVec3 point;     //!< A representative world-space contact point.
+        PxVec3 normal;    //!< World-space normal, pointing from A toward B.
+        PxReal impulse;   //!< Total normal impulse applied to resolve the contact.
+    };
+
+    /// Whether a trigger overlap began or ended this step. Mirrors the managed
+    /// SimTriggerStatus.
+    struct PxwTriggerStatus
+    {
+        enum Enum : PxU32
+        {
+            eLOST = 0,    //!< The other body stopped overlapping the trigger this step.
+            eFOUND = 1    //!< The other body began overlapping the trigger this step.
+        };
+    };
+
+    /// One trigger-volume overlap change reported after a step. Matches the managed
+    /// SimTriggerEvent field-for-field (12 bytes). Sorted by (triggerId, otherId) for the
+    /// same determinism reason as contacts.
+    struct PxwTriggerEvent
+    {
+        PxU32 triggerId;   //!< Stable ID of the trigger shape's body.
+        PxU32 otherId;     //!< Stable ID of the body that entered or left the trigger.
+        PxU32 status;      //!< A PxwTriggerStatus.
+    };
+
     /// How aggressively to erase the simulation state PhysX carries between steps but
     /// that no snapshot can capture: persistent contact manifolds, the solver
     /// warm-start impulses held in them, broadphase pair bookkeeping and islands.
@@ -364,16 +404,18 @@ extern "C"
 
     // --------------------------------------------------------- contact draining ----
     //
-    // Contact and trigger events, drained once after a step. These are intentionally
-    // no-op stubs for now: a deterministic implementation needs a PxSimulationEventCallback
-    // paired with a custom filter shader, and CreateSceneEx currently installs
-    // PxDefaultSimulationFilterShader, so wiring one in risks perturbing the determinism the
-    // rest of the layer is measured against. They exist and return zero so the managed
-    // gameplay host, which drains every tick, resolves and runs; a game that needs contacts
-    // uses a scene query for now. The dst pointers are typed void* here because the stub
-    // never writes through them; the managed side passes its own event-struct pointers.
-    PHYSX_WRAPPER_API PxU32 PxwWorldDrainContacts(pxw::PxwWorld* world, void* dst, PxU32 capacity);
-    PHYSX_WRAPPER_API PxU32 PxwWorldDrainTriggers(pxw::PxwWorld* world, void* dst, PxU32 capacity);
+    // Contact and trigger events produced by the last step, drained once after it. A
+    // UNDPWR world installs a PxSimulationEventCallback and a notification-only filter
+    // shader (eENABLE_CONTACT_EVENTS) that ORs the touch, contact-point and trigger flags
+    // onto the default behaviour without changing which pairs collide or get solved, so the
+    // reported contacts are the ones the simulation already generated. The drains resolve
+    // each actor to its stable ID through the registry, drop hits on unregistered actors,
+    // normalise and sort the buffer, and return how many events were written -- fewer than
+    // were produced when capacity truncates, keeping the front of the sorted list. Call
+    // once per step from a step handler; the buffers are cleared at the next simulate.
+    // Contacts fire on replayed ticks too, so a replay produces the same sorted set.
+    PHYSX_WRAPPER_API PxU32 PxwWorldDrainContacts(pxw::PxwWorld* world, pxw::PxwContactEvent* dst, PxU32 capacity);
+    PHYSX_WRAPPER_API PxU32 PxwWorldDrainTriggers(pxw::PxwWorld* world, pxw::PxwTriggerEvent* dst, PxU32 capacity);
 
     // ------------------------------------------------------------------ mass ----
 
