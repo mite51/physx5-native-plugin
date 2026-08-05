@@ -171,6 +171,11 @@ namespace
 		// same property the shipping contact-event work depends on.
 		bool measureContacts;
 
+		// Use an upright capsule instead of a box, so the representative-workload section
+		// can measure the curved, near-point contact a character controller rests on rather
+		// than a box's flat four-point manifold.
+		bool capsule;
+
 		Config()
 			: bodyCount(16)
 			, withGround(true)
@@ -188,6 +193,7 @@ namespace
 			, gridSpacing(3.0f)
 			, upperDensityScale(1.0f)
 			, measureContacts(false)
+			, capsule(false)
 		{
 		}
 	};
@@ -338,7 +344,19 @@ namespace
 			}
 
 			PxRigidDynamic* body = gPhysics->createRigidDynamic(PxTransform(position));
-			PxRigidActorExt::createExclusiveShape(*body, PxBoxGeometry(0.5f, 0.5f, 0.5f), *gMaterial);
+			if (cfg.capsule)
+			{
+				// A 0.5 m radius, 0.5 m half-height capsule stood upright: PhysX capsules
+				// lie along local X, so rotate the shape a quarter turn about Z to put the
+				// axis on Y and rest it on its rounded end, the way a character controller
+				// does.
+				PxShape* shape = PxRigidActorExt::createExclusiveShape(*body, PxCapsuleGeometry(0.5f, 0.5f), *gMaterial);
+				shape->setLocalPose(PxTransform(PxQuat(PxHalfPi, PxVec3(0.0f, 0.0f, 1.0f))));
+			}
+			else
+			{
+				PxRigidActorExt::createExclusiveShape(*body, PxBoxGeometry(0.5f, 0.5f, 0.5f), *gMaterial);
+			}
 			const PxReal density = (logical > 0) ? 10.0f * cfg.upperDensityScale : 10.0f;
 			PxRigidBodyExt::updateMassAndInertia(*body, density);
 
@@ -2815,6 +2833,48 @@ int main()
 		Config towerTgs = tower;
 		towerTgs.solver = PxSolverType::eTGS;
 		MeasureColdStepCost(towerTgs, "16-high stack, TGS", 900);
+	}
+
+	// --- 3v. Phase 1: representative workloads under both solvers ---------
+	//
+	// The solver decision (AdaptiveRollbackPlan section 4) turns on whether PGS holds
+	// variable depth on the shapes the game actually has, not just on box grids and
+	// columns. These are the ones a character game leans on: a capsule character resting
+	// on terrain, and a high mass ratio, both under PGS (asserted) and TGS (recorded). The
+	// jointed-pile case lives in PxwUndpwrTests as the articulation battery, which both
+	// solvers pass. Vehicles cannot be measured until their integrator state is in the
+	// snapshot (stage 3b).
+	std::printf("\n--- Phase 1: representative workloads, both solvers ---\n");
+	{
+		// A single upright capsule settling onto the ground: one curved, near-point
+		// contact, chain depth 1. This is the character-controller case.
+		Config capsule;
+		capsule.neverSleep = true;
+		capsule.spin = false;
+		capsule.capsule = true;
+		capsule.bodyCount = 1;
+		capsule.spawnHeight = 1.6f;
+		TestVariableDepthUnderColdSteps(capsule, "capsule on terrain, PGS", 60, 600);
+
+		Config capsuleTgs = capsule;
+		capsuleTgs.solver = PxSolverType::eTGS;
+		TestVariableDepthUnderColdSteps(capsuleTgs, "capsule on terrain, TGS", 60, 600, false);
+
+		// High mass ratio: a 40x-density box resting on a normal one, chain depth 2. This
+		// loads the bottom contact the way a heavy prop on a light platform would, without
+		// lengthening the chain past the limit.
+		Config heavy;
+		heavy.neverSleep = true;
+		heavy.spin = false;
+		heavy.stack = true;
+		heavy.bodyCount = 2;
+		heavy.spawnHeight = 1.6f;
+		heavy.upperDensityScale = 40.0f;
+		TestVariableDepthUnderColdSteps(heavy, "40x mass ratio, 2-high, PGS", 60, 600);
+
+		Config heavyTgs = heavy;
+		heavyTgs.solver = PxSolverType::eTGS;
+		TestVariableDepthUnderColdSteps(heavyTgs, "40x mass ratio, 2-high, TGS", 60, 600, false);
 	}
 
 	// --- 4. creation order -----------------------------------------------
