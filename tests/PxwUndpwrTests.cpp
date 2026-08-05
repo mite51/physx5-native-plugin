@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace physx;
@@ -2845,6 +2846,401 @@ namespace
 
 		gSolverType = PxSolverType::eTGS;
 	}
+
+	// ---------------------------------------------------------------------------
+	// Multi-peer harness
+	//
+	// Everything above drives one world, or two worlds from one loop. The one thing
+	// that cannot be reached that way is the property the whole netcode rests on: two
+	// peers, each running its own world and its own rollback loop, fed the same inputs
+	// but at different times over a lossy channel, still agree on every confirmed tick.
+	//
+	// This models exactly that. Each MultiPeer runs the fixed-horizon cold-step loop the
+	// managed RollbackEngine runs: every confirmed tick is a single restore+step from the
+	// previous confirmed snapshot, so the confirmed state is a pure function of the inputs
+	// and never of when they arrived. A SimChannel carries one player's inputs to the
+	// other peer with latency, loss and a redundancy window, the same shape the managed
+	// SimSession puts on the wire. The assertion is that both peers' PxwWorldHashState at
+	// each shared confirmed tick is identical — the native analogue of the confirmed-tick
+	// hash exchange.
+	// ---------------------------------------------------------------------------
+
+	// A deterministic small force for player p on tick t. Both peers compute it identically,
+	// so the only difference between them is the timing with which it is delivered.
+	PxVec3 MultiPeerInput(PxU32 player, int tick)
+	{
+		PxU32 h = (player * 2654435761u) ^ static_cast<PxU32>(tick * 40503 + 12345);
+		float fx = (static_cast<int>(h & 0xFFu) - 128) / 128.0f;
+		float fz = (static_cast<int>((h >> 8) & 0xFFu) - 128) / 128.0f;
+		return PxVec3(fx * 4.0f, 0.0f, fz * 4.0f);
+	}
+
+	struct MultiPeer
+	{
+		static const int kMaxTicks = 4096;
+
+		struct Cmd { PxVec3 force; bool known; };
+
+		TestWorld world;
+		int horizon;
+		int delay;
+		PxU32 localPlayer;
+		bool perturb;               // negative control: diverge this peer on purpose
+
+		int confirmedTick;
+		int currentTick;
+		int lastProduced;
+		bool stalled;
+
+		std::vector<PxU8> confirmedSnapshot;
+		std::vector<Cmd> inputs[2];
+		int lastContig[2];
+		PxVec3 lastKnownForce[2];
+		int lastKnownTick[2];
+
+		std::vector<PxU64> confirmedHash;
+		std::vector<bool> hasConfirmed;
+
+		MultiPeer()
+			: horizon(0), delay(0), localPlayer(0), perturb(false),
+			  confirmedTick(0), currentTick(0), lastProduced(0), stalled(false) {}
+
+		void Init(PxU32 localPlayer_, int horizon_, int delay_, bool perturb_ = false)
+		{
+			localPlayer = localPlayer_;
+			horizon = horizon_;
+			delay = delay_;
+			perturb = perturb_;
+
+			world.Build(false);
+			confirmedSnapshot = world.Capture();
+
+			for (int p = 0; p < 2; ++p)
+			{
+				inputs[p].assign(kMaxTicks, Cmd());
+				lastContig[p] = 0;          // tick 0 needs no input
+				lastKnownForce[p] = PxVec3(0.0f);
+				lastKnownTick[p] = -1;
+			}
+
+			confirmedHash.assign(kMaxTicks, 0);
+			hasConfirmed.assign(kMaxTicks, false);
+
+			confirmedTick = 0;
+			currentTick = 0;
+			lastProduced = 0;
+			stalled = false;
+
+			confirmedHash[0] = world.Hash();
+			hasConfirmed[0] = true;
+		}
+
+		void Destroy() { world.Destroy(); }
+
+		void Submit(PxU32 player, int tick, PxVec3 force)
+		{
+			if (tick < 1 || tick >= kMaxTicks || player > 1)
+			{
+				return;
+			}
+			inputs[player][tick].force = force;
+			inputs[player][tick].known = true;
+
+			while (lastContig[player] + 1 < kMaxTicks && inputs[player][lastContig[player] + 1].known)
+			{
+				++lastContig[player];
+			}
+			if (tick >= lastKnownTick[player])
+			{
+				lastKnownTick[player] = tick;
+				lastKnownForce[player] = force;
+			}
+		}
+
+		int ConfirmedThrough() const
+		{
+			return lastContig[0] < lastContig[1] ? lastContig[0] : lastContig[1];
+		}
+
+		void ApplyFrame(int tick, bool predict)
+		{
+			for (PxU32 p = 0; p < 2; ++p)
+			{
+				PxVec3 f;
+				const Cmd& c = inputs[p][tick];
+				if (c.known)
+				{
+					f = c.force;
+				}
+				else if (predict)
+				{
+					f = lastKnownForce[p];
+				}
+				else
+				{
+					f = PxVec3(0.0f);
+				}
+
+				if (perturb && p == localPlayer)
+				{
+					f += PxVec3(0.001f, 0.0f, 0.0f); // a divergence far below captured precision
+				}
+
+				if (p < world.dynamicIds.size())
+				{
+					PxRigidDynamic* body =
+						static_cast<PxRigidDynamic*>(PxwWorldFindHandle(world.world, world.dynamicIds[p]));
+					if (body != NULL && !body->isSleeping())
+					{
+						body->addForce(f, PxForceMode::eACCELERATION);
+					}
+				}
+			}
+		}
+
+		bool Advance()
+		{
+			int through = ConfirmedThrough();
+			int newConfirmed = through < confirmedTick + 1 ? through : confirmedTick + 1;
+			int target = confirmedTick + horizon;
+
+			if (newConfirmed <= confirmedTick && currentTick >= target)
+			{
+				stalled = true;
+				return false;
+			}
+			stalled = false;
+
+			if (newConfirmed > confirmedTick)
+			{
+				world.Restore(confirmedSnapshot);
+				for (int t = confirmedTick + 1; t <= newConfirmed; ++t)
+				{
+					ApplyFrame(t, false);
+					PxwWorldStep(world.world, kDt);
+					confirmedSnapshot = world.Capture();
+					if (t < kMaxTicks)
+					{
+						confirmedHash[t] = world.Hash();
+						hasConfirmed[t] = true;
+					}
+				}
+				confirmedTick = newConfirmed;
+			}
+
+			std::vector<PxU8> prev = confirmedSnapshot;
+			int end = confirmedTick + horizon;
+			for (int t = confirmedTick + 1; t <= end; ++t)
+			{
+				world.Restore(prev);
+				ApplyFrame(t, true);
+				PxwWorldStep(world.world, kDt);
+				prev = world.Capture();
+			}
+			currentTick = end;
+			return true;
+		}
+
+		// Produces this peer's local inputs up to LocalInputTick, submits them locally, and
+		// returns the ones newly produced so the caller can put them on the channel.
+		void ProduceLocal(std::vector<std::pair<int, PxVec3> >& produced)
+		{
+			int upTo = currentTick + delay;
+			if (upTo >= kMaxTicks)
+			{
+				upTo = kMaxTicks - 1;
+			}
+			for (int t = lastProduced + 1; t <= upTo; ++t)
+			{
+				PxVec3 f = MultiPeerInput(localPlayer, t);
+				Submit(localPlayer, t, f);
+				produced.push_back(std::make_pair(t, f));
+			}
+			if (upTo > lastProduced)
+			{
+				lastProduced = upTo;
+			}
+		}
+	};
+
+	// A best-effort channel: whole packets, delivered after a fixed latency, dropped with a
+	// loss probability, each carrying a redundancy window of recent inputs so a dropped
+	// packet is recovered by the next.
+	struct SimChannel
+	{
+		struct Item { PxU32 player; int tick; PxVec3 force; };
+		struct Packet { int targetPeer; int deliverAt; std::vector<Item> items; };
+
+		std::vector<Packet> inFlight;
+		int latency;
+		int lossPercent;
+		PxU32 rng;
+
+		SimChannel() : latency(0), lossPercent(0), rng(0x1234567u) {}
+
+		PxU32 Next() { rng = rng * 1664525u + 1013904223u; return rng; }
+
+		void Send(int frame, int targetPeer, const std::vector<Item>& window)
+		{
+			if (window.empty())
+			{
+				return;
+			}
+			if (lossPercent > 0 && static_cast<int>(Next() % 100u) < lossPercent)
+			{
+				return; // whole packet lost
+			}
+			Packet packet;
+			packet.targetPeer = targetPeer;
+			packet.deliverAt = frame + latency;
+			packet.items = window;
+			inFlight.push_back(packet);
+		}
+
+		void Deliver(int frame, MultiPeer* peers)
+		{
+			for (size_t i = 0; i < inFlight.size();)
+			{
+				if (inFlight[i].deliverAt <= frame)
+				{
+					const Packet& packet = inFlight[i];
+					for (size_t j = 0; j < packet.items.size(); ++j)
+					{
+						const Item& item = packet.items[j];
+						peers[packet.targetPeer].Submit(item.player, item.tick, item.force);
+					}
+					inFlight.erase(inFlight.begin() + i);
+				}
+				else
+				{
+					++i;
+				}
+			}
+		}
+	};
+
+	// Runs two peers over a channel and compares their confirmed hashes tick for tick.
+	// Returns how many shared confirmed ticks matched and how many were compared.
+	void RunMultiPeerScenario(int horizon, int delay, int latency, int lossPercent,
+		int redundancy, int frames, int minProgress, bool perturbPeer1, const char* label)
+	{
+		std::printf("MultiPeer [%s, %s] H=%d D=%d L=%d loss=%d%% R=%d\n",
+			SolverName(), label, horizon, delay, latency, lossPercent, redundancy);
+
+		MultiPeer peers[2];
+		peers[0].Init(0, horizon, delay, false);
+		peers[1].Init(1, horizon, delay, perturbPeer1);
+
+		SimChannel channel;
+		channel.latency = latency;
+		channel.lossPercent = lossPercent;
+
+		// A per-peer history of produced inputs, so each frame can resend a redundancy window.
+		std::vector<std::pair<int, PxVec3> > history[2];
+		bool anyStall = false;
+
+		for (int frame = 1; frame <= frames; ++frame)
+		{
+			for (int p = 0; p < 2; ++p)
+			{
+				std::vector<std::pair<int, PxVec3> > produced;
+				peers[p].ProduceLocal(produced);
+				for (size_t k = 0; k < produced.size(); ++k)
+				{
+					history[p].push_back(produced[k]);
+				}
+
+				std::vector<SimChannel::Item> window;
+				int start = static_cast<int>(history[p].size()) - redundancy;
+				if (start < 0)
+				{
+					start = 0;
+				}
+				for (size_t k = static_cast<size_t>(start); k < history[p].size(); ++k)
+				{
+					SimChannel::Item item;
+					item.player = peers[p].localPlayer;
+					item.tick = history[p][k].first;
+					item.force = history[p][k].second;
+					window.push_back(item);
+				}
+				channel.Send(frame, 1 - p, window);
+			}
+
+			channel.Deliver(frame, peers);
+
+			peers[0].Advance();
+			peers[1].Advance();
+			anyStall = anyStall || peers[0].stalled || peers[1].stalled;
+		}
+
+		int shared = peers[0].confirmedTick < peers[1].confirmedTick
+			? peers[0].confirmedTick : peers[1].confirmedTick;
+		int compared = 0;
+		int matched = 0;
+		for (int t = 0; t <= shared; ++t)
+		{
+			if (peers[0].hasConfirmed[t] && peers[1].hasConfirmed[t])
+			{
+				++compared;
+				if (peers[0].confirmedHash[t] == peers[1].confirmedHash[t])
+				{
+					++matched;
+				}
+			}
+		}
+
+		Check(compared > 0, "  peers confirmed a shared run of ticks");
+		if (perturbPeer1)
+		{
+			Check(matched < compared, "  a deliberately diverged peer is caught by the hash");
+		}
+		else
+		{
+			Check(matched == compared, "  every shared confirmed tick agrees across peers");
+		}
+
+		// A latent channel stalls each peer for roughly the first L frames, before any
+		// remote input has arrived; that is correct rollback behaviour, not a fault. What
+		// matters is that confirmation then keeps pace, so the metric is progress made, not
+		// whether a stall ever happened.
+		if (minProgress > 0)
+		{
+			Check(shared >= minProgress, "  confirmation kept pace with the channel");
+		}
+		else
+		{
+			Observe(shared > 0, "  confirmation made some progress despite loss");
+		}
+		Observe(anyStall, "  a peer stalled at some point (startup latency or loss)");
+
+		peers[0].Destroy();
+		peers[1].Destroy();
+	}
+
+	void RunMultiPeerTests(PxSolverType::Enum solver)
+	{
+		gSolverType = solver;
+
+		// The clean case: modest latency well within the horizon, no loss. Confirmation
+		// should reach nearly the end after a short startup stall.
+		RunMultiPeerScenario(8, 2, 3, 0, 8, 200, 179, false, "latency, no loss");
+
+		// Loss with a redundancy window wide enough to cover it: confirmation still keeps
+		// pace because a dropped packet's inputs ride the next one.
+		RunMultiPeerScenario(8, 2, 3, 30, 8, 200, 150, false, "loss with redundancy");
+
+		// Negative control: a peer that diverges by a hair is caught by the confirmed hash,
+		// while confirmation itself still keeps pace.
+		RunMultiPeerScenario(8, 2, 3, 0, 8, 200, 179, true, "negative control");
+
+		// Loss with no redundancy at all: the point of the redundancy window, shown by its
+		// absence. Progress is characterised rather than required, but whatever does confirm
+		// must still agree, which the matched check covers.
+		RunMultiPeerScenario(8, 2, 3, 40, 1, 200, 0, false, "loss without redundancy");
+
+		gSolverType = PxSolverType::eTGS;
+	}
 }
 
 int main()
@@ -2951,6 +3347,15 @@ int main()
 	RunVehicleTests(PxSolverType::eTGS);
 	std::printf("\n--- vehicles under rollback (PGS) ---\n");
 	RunVehicleTests(PxSolverType::ePGS);
+
+	// Two peers, two worlds, one lossy channel: the confirmed state is a pure function of
+	// the inputs, never of when they arrived, so the peers' confirmed hashes must agree.
+	// Both solvers, because a fixed horizon makes every confirmed tick a single cold
+	// restore+step that is identical on both peers regardless of solver.
+	std::printf("\n--- multi-peer confirmed-hash agreement (TGS) ---\n");
+	RunMultiPeerTests(PxSolverType::eTGS);
+	std::printf("\n--- multi-peer confirmed-hash agreement (PGS) ---\n");
+	RunMultiPeerTests(PxSolverType::ePGS);
 
 	std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
 	return gFailures == 0 ? 0 : 1;
