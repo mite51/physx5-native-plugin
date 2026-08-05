@@ -74,6 +74,16 @@ namespace
 	// piece of simulation state that survives a step and is not part of any snapshot.
 	bool gUsePcm = true;
 
+	// Set by the articulation runs, which ask the same questions of both solvers. TGS
+	// is the framework default; PGS is the candidate for an adaptive rollback depth,
+	// because it is the only one measured to make replay transparent.
+	PxSolverType::Enum gSolverType = PxSolverType::eTGS;
+
+	const char* SolverName()
+	{
+		return gSolverType == PxSolverType::ePGS ? "PGS" : "TGS";
+	}
+
 	PxwSceneDesc MakeDeterministicSceneDesc()
 	{
 		PxwSceneDesc desc;
@@ -85,7 +95,7 @@ namespace
 			desc.flags |= PxwSceneFlag::eENABLE_PCM;
 		}
 		desc.pruningStructureType = PxPruningStructureType::eDYNAMIC_AABB_TREE;
-		desc.solverType = PxSolverType::eTGS;
+		desc.solverType = gSolverType;
 		desc.broadPhaseType = -1;
 		desc.cpuWorkerThreads = 0;
 		desc.useGpu = 0;
@@ -1822,6 +1832,371 @@ namespace
 
 		PxwWorldDestroy(world);
 	}
+
+	// ---------------------------------------------------------------------------
+	// Articulations
+	//
+	// The plugin captures and restores articulations already: root pose and
+	// velocities, plus joint positions, velocities and forces through a
+	// PxArticulationCache. Nothing exercised any of it until these tests, which ask an
+	// articulation the same questions the tests above ask of a stack of boxes. Does a
+	// restore reach a fixed point, does a replayed tick reproduce the original, and
+	// does either answer depend on the solver.
+	//
+	// The capture is a subset by necessity: link velocities and accelerations are
+	// solver outputs that cannot be written back, so they are excluded. For a
+	// fixed-base chain that should still be complete, because the links' motion is a
+	// function of the root and the joint state. "Should" is what these measure.
+
+	const PxReal kLinkSpan = 1.0f;
+	const PxReal kAnchorHeight = 3.0f;
+	const int kChainLinks = 5;
+
+	// A fixed-base chain of boxes bolted to the world at kAnchorHeight, laid out along
+	// +X and hinged about Z so the whole thing swings down through the XY plane under
+	// gravity. A chain rather than a single link, because what makes an articulation
+	// different from a rigid body is that its links constrain each other, and a
+	// one-link articulation is a rigid body with extra steps.
+	struct ArticulationWorld
+	{
+		PxwWorld* world;
+		PxArticulationReducedCoordinate* articulation;
+		std::vector<PxArticulationLink*> links;
+
+		ArticulationWorld() : world(NULL), articulation(NULL) {}
+
+		// withGround: hangs the chain over the ground plane so the lower links pile up
+		//             on it. Without it the chain never touches anything, which is the
+		//             interesting case: no contacts means no persistent manifolds, so
+		//             it isolates whatever the solver carries across a step in the
+		//             joints alone.
+		void Build(int linkCount = kChainLinks, bool withGround = false)
+		{
+			PxwSceneDesc desc = MakeDeterministicSceneDesc();
+			world = PxwWorldCreate(&desc);
+			PxwWorldSetSleepParams(world, 0.0f, 0.0f, 0u);
+
+			PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+			PxMaterial* material = physics->createMaterial(0.6f, 0.5f, 0.1f);
+
+			if (withGround)
+			{
+				PxBoxGeometry groundGeom(50.0f, 1.0f, 50.0f);
+				PxShape* shape = physics->createShape(groundGeom, *material, true);
+				PxRigidStatic* ground = physics->createRigidStatic(PxTransform(PxVec3(0.0f, -1.0f, 0.0f)));
+				ground->attachShape(*shape);
+				shape->release();
+				PxwWorldRegister(world, 1, ground, PxwHandleKind::eRIGID_STATIC);
+			}
+
+			articulation = physics->createArticulationReducedCoordinate();
+			articulation->setArticulationFlag(PxArticulationFlag::eFIX_BASE, true);
+			// Neighbouring links share a face at the hinge, so self-collision would
+			// bury the joint behaviour under contacts between links that are supposed
+			// to be touching.
+			articulation->setArticulationFlag(PxArticulationFlag::eDISABLE_SELF_COLLISION, true);
+			articulation->setSolverIterationCounts(8, 2);
+
+			PxArticulationLink* parent = NULL;
+			for (int i = 0; i < linkCount; ++i)
+			{
+				const PxTransform pose(PxVec3(kLinkSpan * static_cast<PxReal>(i), kAnchorHeight, 0.0f));
+				PxArticulationLink* link = articulation->createLink(parent, pose);
+
+				PxShape* shape = physics->createShape(
+					PxBoxGeometry(kLinkSpan * 0.5f, 0.15f, 0.15f), *material, true);
+				link->attachShape(*shape);
+				shape->release();
+				PxRigidBodyExt::updateMassAndInertia(*link, 10.0f);
+
+				if (parent != NULL)
+				{
+					PxArticulationJointReducedCoordinate* joint = link->getInboundJoint();
+					joint->setJointType(PxArticulationJointType::eREVOLUTE);
+					joint->setParentPose(PxTransform(PxVec3(kLinkSpan * 0.5f, 0.0f, 0.0f)));
+					joint->setChildPose(PxTransform(PxVec3(-kLinkSpan * 0.5f, 0.0f, 0.0f)));
+					joint->setMotion(PxArticulationAxis::eSWING2, PxArticulationMotion::eFREE);
+				}
+
+				links.push_back(link);
+				parent = link;
+			}
+
+			material->release();
+			PxwWorldRegister(world, 10u, articulation, PxwHandleKind::eARTICULATION);
+			PxwWorldCommitPending(world);
+		}
+
+		void Destroy()
+		{
+			if (world != NULL)
+			{
+				PxwWorldDestroy(world);
+				world = NULL;
+				articulation = NULL;
+				links.clear();
+			}
+		}
+
+		PxU64 Hash() { return PxwWorldHashState(world); }
+
+		std::vector<PxU8> Capture()
+		{
+			std::vector<PxU8> buffer(PxwWorldStateSize(world));
+			PxU64 hash = 0;
+			const PxU32 written = PxwWorldCaptureState(world, buffer.data(), static_cast<PxU32>(buffer.size()), &hash);
+			buffer.resize(written);
+			return buffer;
+		}
+
+		PxI32 Restore(const std::vector<PxU8>& buffer)
+		{
+			return PxwWorldRestoreState(world, buffer.data(), static_cast<PxU32>(buffer.size()));
+		}
+
+		// Drives the tip, which is the most sensitive place to push a chain: an error
+		// anywhere in the joint state shows up amplified at the far end.
+		void ApplyInput(int tickIndex)
+		{
+			if (links.empty())
+			{
+				return;
+			}
+			const float wobble = 0.35f * static_cast<float>((tickIndex % 7) - 3);
+			links.back()->addForce(PxVec3(0.0f, wobble, wobble * 0.5f), PxForceMode::eACCELERATION);
+		}
+	};
+
+	// The same snapshot-in, snapshot-out tick as SimRunner, over an articulation.
+	struct ArticulationRunner
+	{
+		ArticulationWorld world;
+		std::vector<PxU8> snapshot;
+
+		void Build(int linkCount = kChainLinks, bool withGround = false)
+		{
+			world.Build(linkCount, withGround);
+			snapshot = world.Capture();
+		}
+
+		void Destroy() { world.Destroy(); }
+
+		void Rewind(const std::vector<PxU8>& to) { snapshot = to; }
+
+		void Tick(int tickIndex)
+		{
+			world.Restore(snapshot);
+			world.ApplyInput(tickIndex);
+			PxwWorldStep(world.world, kDt);
+			snapshot = world.Capture();
+		}
+
+		PxU64 SnapshotHash() const { return PxwHashBuffer(snapshot.data(), static_cast<PxU32>(snapshot.size())); }
+	};
+
+	void TestArticulationBaselineDeterminism()
+	{
+		std::printf("TestArticulationBaselineDeterminism [%s]\n", SolverName());
+
+		ArticulationRunner a, b;
+		a.Build();
+		b.Build();
+
+		bool identical = true;
+		for (int tick = 0; tick < 240; ++tick)
+		{
+			a.Tick(tick);
+			b.Tick(tick);
+			if (a.SnapshotHash() != b.SnapshotHash())
+			{
+				std::printf("        diverged at tick %d\n", tick);
+				identical = false;
+				break;
+			}
+		}
+		Check(identical, "two identically built articulation worlds stay bit-identical for 240 ticks ["
+			+ std::string(SolverName()) + "]");
+
+		a.Destroy();
+		b.Destroy();
+	}
+
+	// Restoring a captured state and capturing again has to give the same bytes back,
+	// or the tick function is not a function: every rollback would nudge the state
+	// even when it replays the same inputs. The rigid-body version of this test found
+	// that a pose round trip is only a fixed point after one cycle, so this checks the
+	// same shape -- first capture may differ, second and third must agree.
+	void TestArticulationRestoreRoundTrip()
+	{
+		std::printf("TestArticulationRestoreRoundTrip [%s]\n", SolverName());
+
+		ArticulationRunner a;
+		a.Build();
+		for (int tick = 0; tick < 60; ++tick)
+		{
+			a.Tick(tick);
+		}
+
+		const std::vector<PxU8> first = a.world.Capture();
+		a.world.Restore(first);
+		const std::vector<PxU8> second = a.world.Capture();
+		a.world.Restore(second);
+		const std::vector<PxU8> third = a.world.Capture();
+
+		const bool immediate = first.size() == second.size() &&
+			std::memcmp(first.data(), second.data(), first.size()) == 0;
+		const bool settled = second.size() == third.size() &&
+			std::memcmp(second.data(), third.data(), second.size()) == 0;
+
+		Observe(immediate, "an articulation capture is its own fixed point immediately ["
+			+ std::string(SolverName()) + "]");
+		Check(settled, "an articulation capture is a fixed point after one round trip ["
+			+ std::string(SolverName()) + "]");
+
+		a.Destroy();
+	}
+
+	// What the shipping framework actually relies on. Every peer runs the same fixed
+	// prediction horizon, so every peer rewinds by the same amount on the same tick,
+	// and the only question is whether replaying a tick from its own snapshot
+	// reproduces it. If this fails, articulations cannot be rolled back at all.
+	void TestArticulationFixedDepthRollback(int depth, bool withGround, const char* label)
+	{
+		std::printf("TestArticulationFixedDepthRollback [%s, %s]\n", label, SolverName());
+
+		const int warmup = 30;
+		const int frames = 300;
+		const int historyDepth = 32;
+
+		ArticulationRunner straight, rewinding;
+		straight.Build(kChainLinks, withGround);
+		rewinding.Build(kChainLinks, withGround);
+
+		std::vector<std::vector<PxU8> > history(historyDepth);
+
+		int tick = 0;
+		for (; tick < warmup; ++tick)
+		{
+			straight.Tick(tick);
+			rewinding.Tick(tick);
+			history[tick % historyDepth] = rewinding.snapshot;
+		}
+
+		bool matched = true;
+		int divergedAt = -1;
+
+		for (int frame = 0; frame < frames && matched; ++frame, ++tick)
+		{
+			straight.Tick(tick);
+
+			const int from = tick - depth;
+			rewinding.Rewind(history[from % historyDepth]);
+			for (int t = from + 1; t <= tick; ++t)
+			{
+				rewinding.Tick(t);
+				history[t % historyDepth] = rewinding.snapshot;
+			}
+
+			if (straight.snapshot.size() != rewinding.snapshot.size() ||
+				std::memcmp(straight.snapshot.data(), rewinding.snapshot.data(), straight.snapshot.size()) != 0)
+			{
+				matched = false;
+				divergedAt = frame;
+			}
+		}
+
+		std::printf("        %d frames rewinding %d ticks every frame: %s\n",
+			matched ? frames : divergedAt, depth, matched ? "still identical" : "diverged");
+		Check(matched, "an articulation replays a fixed rewind depth exactly ["
+			+ std::string(label) + ", " + SolverName() + "]");
+
+		straight.Destroy();
+		rewinding.Destroy();
+	}
+
+	// The phase 1 question, asked of articulations. An adaptive prediction horizon
+	// means peers rewind by whatever their own latency demands, so their rewind depths
+	// differ every frame. Boxes only survive that under PGS, and only when no contact
+	// chain runs deeper than eight bodies. A chain of jointed links is a contact chain
+	// by another name, so whether the same limit applies is the thing to find out.
+	void TestArticulationVariableDepthRollback(bool withGround, const char* label, int frames)
+	{
+		std::printf("TestArticulationVariableDepthRollback [%s, %s]\n", label, SolverName());
+
+		const int warmup = 30;
+		const int historyDepth = 32;
+
+		ArticulationRunner peerA, peerB;
+		peerA.Build(kChainLinks, withGround);
+		peerB.Build(kChainLinks, withGround);
+
+		std::vector<std::vector<PxU8> > historyA(historyDepth);
+		std::vector<std::vector<PxU8> > historyB(historyDepth);
+
+		int tick = 0;
+		for (; tick < warmup; ++tick)
+		{
+			peerA.Tick(tick);
+			peerB.Tick(tick);
+			historyA[tick % historyDepth] = peerA.snapshot;
+			historyB[tick % historyDepth] = peerB.snapshot;
+		}
+
+		bool matched = true;
+		int divergedAt = -1;
+
+		for (int frame = 0; frame < frames && matched; ++frame, ++tick)
+		{
+			const int depthA = 1 + (frame * 3) % 7;
+			const int depthB = 1 + (frame * 5) % 17;
+
+			const int fromA = tick - depthA;
+			peerA.Rewind(historyA[fromA % historyDepth]);
+			for (int t = fromA + 1; t <= tick; ++t)
+			{
+				peerA.Tick(t);
+				historyA[t % historyDepth] = peerA.snapshot;
+			}
+
+			const int fromB = tick - depthB;
+			peerB.Rewind(historyB[fromB % historyDepth]);
+			for (int t = fromB + 1; t <= tick; ++t)
+			{
+				peerB.Tick(t);
+				historyB[t % historyDepth] = peerB.snapshot;
+			}
+
+			if (peerA.snapshot.size() != peerB.snapshot.size() ||
+				std::memcmp(peerA.snapshot.data(), peerB.snapshot.data(), peerA.snapshot.size()) != 0)
+			{
+				matched = false;
+				divergedAt = frame;
+			}
+		}
+
+		std::printf("        %d frames of differing rollback depth: %s\n",
+			matched ? frames : divergedAt, matched ? "still identical" : "diverged");
+		Observe(matched, "an articulation survives peers rewinding by different depths ["
+			+ std::string(label) + ", " + SolverName() + "]");
+
+		peerA.Destroy();
+		peerB.Destroy();
+	}
+
+	// Runs the articulation set under one solver.
+	void RunArticulationTests(PxSolverType::Enum solver)
+	{
+		gSolverType = solver;
+
+		TestArticulationBaselineDeterminism();
+		TestArticulationRestoreRoundTrip();
+		TestArticulationFixedDepthRollback(4, false, "free-swinging chain");
+		TestArticulationFixedDepthRollback(4, true, "chain resting on ground");
+		TestArticulationVariableDepthRollback(false, "free-swinging chain", 600);
+		TestArticulationVariableDepthRollback(true, "chain resting on ground", 600);
+
+		gSolverType = PxSolverType::eTGS;
+	}
 }
 
 int main()
@@ -1909,6 +2284,14 @@ int main()
 	TestRewindDepthSweep(PxwContactResetMode::eNONE, "none");
 	TestRewindDepthSweep(PxwContactResetMode::eRESET_FILTERING, "resetFiltering");
 	TestRewindDepthSweep(PxwContactResetMode::eREINSERT, "reinsert");
+
+	// Articulations. The plugin has captured and restored them since the layer landed,
+	// and nothing measured whether that works. Both solvers, because whether PGS is
+	// usable for articulations is what gates an adaptive prediction horizon.
+	std::printf("\n--- articulations under rollback (TGS) ---\n");
+	RunArticulationTests(PxSolverType::eTGS);
+	std::printf("\n--- articulations under rollback (PGS) ---\n");
+	RunArticulationTests(PxSolverType::ePGS);
 
 	std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
 	return gFailures == 0 ? 0 : 1;
