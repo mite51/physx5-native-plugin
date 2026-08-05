@@ -1736,6 +1736,44 @@ namespace
 		PxwWorldDestroy(world);
 	}
 
+	// The managed DeterministicWorld.Register calls PxwApplyDeterministicRigidDefaults on
+	// every dynamic body it registers, and the determinism the whole suite measures rests
+	// on what that call does. PhysX does not default to these values: speculative CCD keys
+	// its contact generation off velocity history, so a restored state would generate
+	// different contacts from the state it was captured from, and the default max
+	// depenetration velocity is effectively unbounded. This pins both so a change in the
+	// helper, or in a PhysX default, is caught here rather than as a slow desync in a game.
+	void TestDeterministicRigidDefaults()
+	{
+		std::printf("TestDeterministicRigidDefaults\n");
+
+		PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+		PxMaterial* material = physics->createMaterial(0.6f, 0.5f, 0.1f);
+		PxShape* shape = physics->createShape(PxBoxGeometry(0.5f, 0.5f, 0.5f), *material, true);
+		PxRigidDynamic* body = physics->createRigidDynamic(PxTransform(PxVec3(0.0f, 5.0f, 0.0f)));
+		body->attachShape(*shape);
+		shape->release();
+		PxRigidBodyExt::updateMassAndInertia(*body, 10.0f);
+
+		// A fresh dynamic starts with speculative CCD off in this PhysX build, so enable it
+		// first: the test has to prove the helper clears it, not that it happened to be
+		// clear already.
+		body->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
+
+		PxwApplyDeterministicRigidDefaults(body, 7, 3);
+
+		PxU32 posIters = 0, velIters = 0;
+		body->getSolverIterationCounts(posIters, velIters);
+		Check(posIters == 7u && velIters == 3u, "the deterministic defaults apply the requested solver iteration counts");
+		Check(!(body->getRigidBodyFlags() & PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD),
+			"the deterministic defaults clear speculative CCD");
+		Check(body->getMaxDepenetrationVelocity() < 1.0e6f,
+			"the deterministic defaults bound the max depenetration velocity");
+
+		body->release();
+		material->release();
+	}
+
 	// Queries must resolve every hit to a stable ID and return a deterministic order,
 	// since two peers iterating the same hits in a different order would desync.
 	void TestSceneQueries()
@@ -2235,6 +2273,7 @@ int main()
 	// quaternion-first pose layout the managed structs depend on.
 	std::printf("\n--- gameplay body api and scene queries ---\n");
 	TestBodyApiAndReadPoseLayout();
+	TestDeterministicRigidDefaults();
 	TestSceneQueries();
 
 	// Is a snapshot enough to reproduce a step exactly? No: PhysX warm-starts the

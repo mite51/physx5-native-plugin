@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <utility>
 
 using namespace physx;
 
@@ -162,6 +163,14 @@ namespace
 		// lengthening the chain, which is how section 3t tells the two apart.
 		PxReal upperDensityScale;
 
+		// Install a touch-reporting filter shader and simulation event callback so the
+		// depth of the resting contact graph can be measured (section 3u). Off by default:
+		// every asserted determinism scene keeps PxDefaultSimulationFilterShader untouched,
+		// so the numbers those tests defend are unaffected. The shader added here only ORs
+		// in notification flags and changes no collision or solve decision, which is the
+		// same property the shipping contact-event work depends on.
+		bool measureContacts;
+
 		Config()
 			: bodyCount(16)
 			, withGround(true)
@@ -178,6 +187,7 @@ namespace
 			, spawnHeight(40.0f)
 			, gridSpacing(3.0f)
 			, upperDensityScale(1.0f)
+			, measureContacts(false)
 		{
 		}
 	};
@@ -195,12 +205,58 @@ namespace
 		PxU32 sleeping;
 	};
 
+	// Records the actor pairs PhysX reports as touching during a step, so the resting
+	// contact graph can be rebuilt and its depth measured. This is the only piece of the
+	// suite that reads contacts from PhysX rather than from PxSimulationStatistics, which
+	// gives totals but not who-touches-whom.
+	struct ContactGraphRecorder : PxSimulationEventCallback
+	{
+		std::vector<std::pair<const PxActor*, const PxActor*> > touching;
+
+		void Clear() { touching.clear(); }
+
+		void onContact(const PxContactPairHeader& header, const PxContactPair* pairs, PxU32 count) override
+		{
+			for (PxU32 i = 0; i < count; ++i)
+			{
+				const PxPairFlags e = pairs[i].events;
+				if (e & (PxPairFlag::eNOTIFY_TOUCH_FOUND | PxPairFlag::eNOTIFY_TOUCH_PERSISTS))
+				{
+					touching.push_back(std::make_pair(header.actors[0], header.actors[1]));
+				}
+			}
+		}
+
+		void onTrigger(PxTriggerPair*, PxU32) override {}
+		void onConstraintBreak(PxConstraintInfo*, PxU32) override {}
+		void onWake(PxActor**, PxU32) override {}
+		void onSleep(PxActor**, PxU32) override {}
+		void onAdvance(const PxRigidBody* const*, const PxTransform*, const PxU32) override {}
+	};
+
+	// The default filter shader with contact-touch notifications ORed on. It changes no
+	// collision or solve decision -- it only asks PhysX to report the contacts it was
+	// already generating -- so a scene built with it simulates identically to one built
+	// with PxDefaultSimulationFilterShader. That is the whole reason contact reporting can
+	// be added to the deterministic runtime later without moving the numbers.
+	PxFilterFlags ChainDepthFilterShader(
+		PxFilterObjectAttributes attributes0, PxFilterData filterData0,
+		PxFilterObjectAttributes attributes1, PxFilterData filterData1,
+		PxPairFlags& pairFlags, const void* constantBlock, PxU32 constantBlockSize)
+	{
+		const PxFilterFlags flags = PxDefaultSimulationFilterShader(
+			attributes0, filterData0, attributes1, filterData1, pairFlags, constantBlock, constantBlockSize);
+		pairFlags |= PxPairFlag::eNOTIFY_TOUCH_FOUND | PxPairFlag::eNOTIFY_TOUCH_PERSISTS;
+		return flags;
+	}
+
 	struct World
 	{
 		PxScene* scene;
 		std::vector<PxRigidDynamic*> bodies;   // always in logical order, whatever the creation order
 		PxRigidStatic* ground;
 		Config config;
+		ContactGraphRecorder contacts;
 
 		World() : scene(NULL), ground(NULL) {}
 
@@ -211,7 +267,7 @@ namespace
 			PxSceneDesc desc(gPhysics->getTolerancesScale());
 			desc.gravity = PxVec3(0.0f, -9.81f, 0.0f);
 			desc.cpuDispatcher = gDispatcher;
-			desc.filterShader = PxDefaultSimulationFilterShader;
+			desc.filterShader = cfg.measureContacts ? ChainDepthFilterShader : PxDefaultSimulationFilterShader;
 			desc.broadPhaseType = cfg.broadPhase;
 			desc.solverType = cfg.solver;
 			if (cfg.enhancedDeterminism)
@@ -231,6 +287,11 @@ namespace
 				desc.flags |= PxSceneFlag::eDISABLE_CONTACT_CACHE;
 			}
 			scene = gPhysics->createScene(desc);
+
+			if (cfg.measureContacts)
+			{
+				scene->setSimulationEventCallback(&contacts);
+			}
 
 			if (cfg.withGround)
 			{
@@ -316,6 +377,12 @@ namespace
 
 		void Step()
 		{
+			// onContact fires during fetchResults, so the touch set is cleared before the
+			// step and holds this step's contacts afterwards.
+			if (config.measureContacts)
+			{
+				contacts.Clear();
+			}
 			scene->simulate(kDt);
 			scene->fetchResults(true);
 		}
@@ -373,6 +440,87 @@ namespace
 			ground = NULL;
 		}
 	};
+
+	// -----------------------------------------------------------------------
+	// Contact chain depth
+	//
+	// The variable-depth failures track a contact chain deeper than eight bodies. That
+	// number has been an observation about column height rather than a measured property
+	// of the contact graph. These turn it into a measurement: build the graph from the
+	// touch set the recorder captured, and report the deepest chain of resting contacts
+	// rooted at the ground. A game can carry the same walk to enforce the limit on real
+	// content instead of trusting that its stacks are short enough.
+	// -----------------------------------------------------------------------
+
+	int ContactNodeOf(const World& w, const PxActor* actor)
+	{
+		// Node 0 is the ground; nodes 1..N are the dynamic bodies in logical order.
+		if (actor == w.ground)
+		{
+			return 0;
+		}
+		for (size_t i = 0; i < w.bodies.size(); ++i)
+		{
+			if (w.bodies[i] == actor)
+			{
+				return static_cast<int>(i) + 1;
+			}
+		}
+		return -1;
+	}
+
+	// Longest simple path from `node`, counting the dynamic bodies on it. The ground
+	// (node 0) anchors the chain but is not itself counted. N is small and the measured
+	// graphs are essentially trees, so the exponential worst case never bites.
+	int LongestContactChain(const std::vector<std::vector<int> >& adjacency, int node, std::vector<char>& onPath)
+	{
+		onPath[static_cast<size_t>(node)] = 1;
+		int deepest = 0;
+		for (size_t i = 0; i < adjacency[static_cast<size_t>(node)].size(); ++i)
+		{
+			const int next = adjacency[static_cast<size_t>(node)][i];
+			if (!onPath[static_cast<size_t>(next)])
+			{
+				const int sub = LongestContactChain(adjacency, next, onPath);
+				if (sub > deepest)
+				{
+					deepest = sub;
+				}
+			}
+		}
+		onPath[static_cast<size_t>(node)] = 0;
+		return (node == 0 ? 0 : 1) + deepest;
+	}
+
+	// The number of dynamic bodies on the deepest chain of resting contacts rooted at the
+	// ground, built from the touch set of the last Step(). Step() must have run with
+	// Config::measureContacts on. A flat grid returns 1 (every box touches only the
+	// ground); a settled column of height H returns H.
+	int MaxContactChainDepth(const World& w)
+	{
+		if (w.ground == NULL)
+		{
+			return 0;
+		}
+
+		const int nodeCount = static_cast<int>(w.bodies.size()) + 1;
+		std::vector<std::vector<int> > adjacency(static_cast<size_t>(nodeCount));
+
+		for (size_t k = 0; k < w.contacts.touching.size(); ++k)
+		{
+			const int a = ContactNodeOf(w, w.contacts.touching[k].first);
+			const int b = ContactNodeOf(w, w.contacts.touching[k].second);
+			if (a < 0 || b < 0 || a == b)
+			{
+				continue;
+			}
+			adjacency[static_cast<size_t>(a)].push_back(b);
+			adjacency[static_cast<size_t>(b)].push_back(a);
+		}
+
+		std::vector<char> onPath(static_cast<size_t>(nodeCount), 0);
+		return LongestContactChain(adjacency, 0, onPath);
+	}
 
 	// -----------------------------------------------------------------------
 	// Comparison
@@ -2502,6 +2650,62 @@ int main()
 		// contact chain of eight or fewer survives peers rewinding by different
 		// amounts, in the scene and over the window where nine does not.
 		Check(shallowHeld, "a contact chain up to 8 deep survives varying rollback depth");
+	}
+
+	// --- 3u. what is the measured contact chain depth? --------------------
+	//
+	// Everything above reads the chain depth off the column height by construction. This
+	// closes the loop by measuring it from the contact graph PhysX actually built, so the
+	// eight-deep limit becomes a number a diagnostic reports rather than one a comment
+	// remembers. A settled column of height H must measure depth H; a flat grid, where
+	// every box rests only on the ground, must measure depth 1. The same walk can run in a
+	// game to enforce the limit on real content.
+	std::printf("\n--- what is the measured contact chain depth? ---\n");
+	{
+		std::printf("        %-40s %-10s  %s\n", "settled scene", "measured", "expected");
+		bool allMatched = true;
+
+		static const int kColumns[] = { 2, 4, 8, 9, 12 };
+		const int columnCount = static_cast<int>(sizeof(kColumns) / sizeof(kColumns[0]));
+		for (int i = 0; i < columnCount; ++i)
+		{
+			Config column;
+			column.measureContacts = true;
+			column.neverSleep = true;
+			column.stack = true;
+			column.spin = false;
+			column.spawnHeight = 1.6f;
+			column.bodyCount = kColumns[i];
+
+			World w;
+			w.Build(column);
+			for (int t = 0; t < 200; ++t) { w.Step(); }
+			const int depth = MaxContactChainDepth(w);
+			w.Destroy();
+
+			char label[64];
+			std::snprintf(label, sizeof(label), "%d-high column", kColumns[i]);
+			std::printf("        %-40s %-10d  %d\n", label, depth, kColumns[i]);
+			if (depth != kColumns[i]) { allMatched = false; }
+		}
+
+		// The flat grid: sixteen bodies, each resting only on the ground, so one contact
+		// deep however many bodies there are.
+		Config grid;
+		grid.measureContacts = true;
+		grid.neverSleep = true;
+		grid.spin = false;
+		grid.spawnHeight = 1.6f;
+
+		World g;
+		g.Build(grid);
+		for (int t = 0; t < 200; ++t) { g.Step(); }
+		const int gridDepth = MaxContactChainDepth(g);
+		g.Destroy();
+		std::printf("        %-40s %-10d  %d\n", "4x4 grid, 3 m apart", gridDepth, 1);
+		if (gridDepth != 1) { allMatched = false; }
+
+		Check(allMatched, "the contact-graph walk measures the chain depth each scene was built with");
 	}
 
 	// --- 3t. chain depth, or the load at the bottom of it? ----------------

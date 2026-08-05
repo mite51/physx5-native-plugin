@@ -593,6 +593,12 @@ namespace pxw
 				if (vehicle != NULL)
 				{
 					vehicle->AddToScene();
+					// Putting the chassis actor in the scene is not enough: a vehicle is
+					// only advanced by VehicleStepScene, which iterates the per-scene step
+					// list. Without this it sits inert. VehicleRegister is idempotent, so a
+					// vehicle that also came through the legacy AddVehicleToScene path is
+					// not double-registered.
+					VehicleRegister(scene, vehicle);
 				}
 				break;
 			}
@@ -625,6 +631,7 @@ namespace pxw
 				PxwVehicle* vehicle = AsVehicle(entry);
 				if (vehicle != NULL)
 				{
+					VehicleUnregister(vehicle);
 					vehicle->RemoveFromScene();
 				}
 				break;
@@ -868,6 +875,20 @@ namespace pxw
 					{
 						articulation->wakeUp();
 					}
+				}
+				break;
+			}
+			case PxwHandleKind::eVEHICLE:
+			{
+				// A parked vehicle disables simulation on its chassis, the same as a
+				// rigid body. The chassis flag is also the single source of truth
+				// VehicleStepScene reads to skip a disabled vehicle, so nothing advances
+				// its drivetrain while it is out of play.
+				PxwVehicle* vehicle = AsVehicle(entry);
+				PxRigidBody* chassis = vehicle != NULL ? vehicle->GetActor() : NULL;
+				if (chassis != NULL)
+				{
+					chassis->setActorFlag(PxActorFlag::eDISABLE_SIMULATION, !enabled);
 				}
 				break;
 			}

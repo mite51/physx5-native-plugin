@@ -166,6 +166,14 @@ namespace pxw
 		entry->context.gravity = scene->getGravity();
 		for (size_t i = 0; i < entry->vehicles.size(); i++)
 		{
+			// A vehicle parked through the UNDPWR registry has eDISABLE_SIMULATION set on
+			// its chassis; stepping its drivetrain while it is out of play would advance
+			// state a snapshot no longer tracks, so skip it here as well.
+			PxRigidBody* chassis = entry->vehicles[i]->GetActor();
+			if (chassis != NULL && (chassis->getActorFlags() & PxActorFlag::eDISABLE_SIMULATION))
+			{
+				continue;
+			}
 			entry->vehicles[i]->Step(dt, entry->context);
 		}
 	}
