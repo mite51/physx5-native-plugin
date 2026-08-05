@@ -18,7 +18,9 @@ namespace pxw
 	namespace
 	{
 		const PxU32 kStateMagic = 0x57444E55u;   // 'UNDW'
-		const PxU32 kStateVersion = 2u;
+		// v3 adds the vehicle integrator payload (wheels + drivetrain) alongside the
+		// chassis rigid body a vehicle already carried.
+		const PxU32 kStateVersion = 3u;
 
 		const PxU64 kFnvOffsetBasis = 0xcbf29ce484222325ULL;
 		const PxU64 kFnvPrime = 0x100000001b3ULL;
@@ -88,6 +90,19 @@ namespace pxw
 			// Followed by 3 * dofCount floats: joint positions, velocities, forces.
 		};
 
+		// A vehicle's chassis is captured as a RigidPayload, exactly as it was before
+		// vehicles carried any drivetrain state. The counts that follow describe the
+		// integrator blob appended after this header; PxwVehicleSnapshotSize turns them
+		// back into a byte count on restore and hashing without touching the vehicle.
+		struct VehiclePayload
+		{
+			RigidPayload chassis;
+			PxU32 driveMode;
+			PxU32 nbWheels;
+			// Followed by PxwVehicleSnapshotSize(driveMode, nbWheels) bytes of
+			// per-wheel and, for engine drive, drivetrain integrator state.
+		};
+
 		// Canonical form of a pose for snapshot purposes.
 		//
 		// PxRigidActor::setGlobalPose stores pose.getNormalized(), and normalisation is
@@ -155,9 +170,15 @@ namespace pxw
 		PxU32 dofCount;
 		PxU32 linkCount;
 
+		// Vehicle bookkeeping, cached at register time so the payload can be sized
+		// without dereferencing the vehicle. Unused for other kinds.
+		PxU32 nbWheels;
+		PxU32 driveMode;
+
 		PxwWorldEntry()
 			: stableId(0), kind(0), handle(NULL), inScene(false), pendingAdd(false),
-			  pendingRemove(false), enabled(true), restTicks(0), cache(NULL), dofCount(0), linkCount(0)
+			  pendingRemove(false), enabled(true), restTicks(0), cache(NULL), dofCount(0), linkCount(0),
+			  nbWheels(0), driveMode(0)
 		{
 		}
 	};
@@ -516,8 +537,10 @@ namespace pxw
 			{
 			case PxwHandleKind::eRIGID_DYNAMIC:
 			case PxwHandleKind::eRIGID_KINEMATIC:
-			case PxwHandleKind::eVEHICLE:
 				return static_cast<PxU32>(sizeof(RigidPayload));
+			case PxwHandleKind::eVEHICLE:
+				return static_cast<PxU32>(sizeof(VehiclePayload)) +
+					PxwVehicleSnapshotSize(static_cast<PxwVehicleDriveMode::Enum>(e.driveMode), e.nbWheels);
 			case PxwHandleKind::eARTICULATION:
 				return static_cast<PxU32>(sizeof(ArticulationPayload) + sizeof(PxReal) * 3 * e.dofCount);
 			default:
@@ -948,6 +971,49 @@ namespace pxw
 				}
 				articulation->setWakeCounter(kNeverSleepWakeCounter);
 			}
+		}
+
+		// A vehicle is its chassis rigid body plus the drivetrain state the SDK
+		// integrates. The chassis reuses the rigid path so it round-trips exactly the
+		// way it did before vehicles carried a payload; the drivetrain state is owned
+		// by PxwVehicle, which serialises only integrator values (see CaptureSnapshot).
+		void CaptureVehicle(const PxwWorldEntry& entry, VehiclePayload& header, void* blob)
+		{
+			std::memset(&header, 0, sizeof(header));
+			CaptureRigid(entry, header.chassis);
+			header.driveMode = entry.driveMode;
+			header.nbWheels = entry.nbWheels;
+
+			PxwVehicle* vehicle = AsVehicle(entry);
+			if (vehicle != NULL)
+			{
+				vehicle->CaptureSnapshot(blob, PxwVehicleSnapshotSize(
+					static_cast<PxwVehicleDriveMode::Enum>(entry.driveMode), entry.nbWheels));
+			}
+		}
+
+		void RestoreVehicle(PxwWorldEntry& entry, const VehiclePayload& header, const void* blob)
+		{
+			RestoreRigid(entry, header.chassis);
+
+			PxwVehicle* vehicle = AsVehicle(entry);
+			if (vehicle == NULL)
+			{
+				return;
+			}
+
+			// A layout mismatch means the vehicle was reconfigured between capture and
+			// restore, which a rollback must never do; skip the blob rather than read
+			// it against the wrong shape, mirroring the articulation DOF-count guard.
+			if (header.driveMode != entry.driveMode || header.nbWheels != entry.nbWheels)
+			{
+				LogMessage(PxErrorCode::eINVALID_PARAMETER,
+					"UNDPWR: vehicle wheel count or drive mode changed between capture and restore; skipping drivetrain state.\n");
+				return;
+			}
+
+			vehicle->RestoreSnapshot(blob, PxwVehicleSnapshotSize(
+				static_cast<PxwVehicleDriveMode::Enum>(entry.driveMode), entry.nbWheels));
 		}
 
 		void ApplyEnabled(PxwWorldEntry& entry, bool enabled)
@@ -1690,6 +1756,15 @@ PxI32 PxwWorldRegister(PxwWorld* world, PxU32 stableId, void* handle, PxU32 kind
 		entry.dofCount = articulation->getDofs();
 		entry.linkCount = articulation->getNbLinks();
 	}
+	else if (kind == PxwHandleKind::eVEHICLE)
+	{
+		// The axle description is fixed before Finalize and never changes, so the
+		// wheel count and drive mode are stable for the life of the registration --
+		// the vehicle equivalent of an articulation's DOF count.
+		PxwVehicle* vehicle = static_cast<PxwVehicle*>(handle);
+		entry.nbWheels = vehicle->GetWheelCount();
+		entry.driveMode = static_cast<PxU32>(vehicle->GetDriveMode());
+	}
 
 	world->entries.insert(world->entries.begin() + static_cast<std::ptrdiff_t>(insertAt), entry);
 	return PxwResult::eOK;
@@ -2027,6 +2102,12 @@ PxU32 PxwWorldCaptureState(PxwWorld* world, void* dst, PxU32 capacity, PxU64* ou
 			PxReal* joints = reinterpret_cast<PxReal*>(cursor + sizeof(ArticulationPayload));
 			CaptureArticulation(entry, *payload, joints);
 		}
+		else if (entry.kind == PxwHandleKind::eVEHICLE)
+		{
+			VehiclePayload* payload = reinterpret_cast<VehiclePayload*>(cursor);
+			void* blob = cursor + sizeof(VehiclePayload);
+			CaptureVehicle(entry, *payload, blob);
+		}
 		else
 		{
 			RigidPayload* payload = reinterpret_cast<RigidPayload*>(cursor);
@@ -2128,6 +2209,13 @@ PxI32 PxwWorldRestoreState(PxwWorld* world, const void* src, PxU32 size)
 			RestoreArticulation(entry, *payload, joints);
 			ApplyEnabled(entry, (payload->flags & StateFlag::eDISABLED) == 0);
 		}
+		else if (entry.kind == PxwHandleKind::eVEHICLE)
+		{
+			const VehiclePayload* payload = reinterpret_cast<const VehiclePayload*>(cursor);
+			const void* blob = cursor + sizeof(VehiclePayload);
+			RestoreVehicle(entry, *payload, blob);
+			ApplyEnabled(entry, (payload->chassis.flags & StateFlag::eDISABLED) == 0);
+		}
 		else
 		{
 			const RigidPayload* payload = reinterpret_cast<const RigidPayload*>(cursor);
@@ -2187,6 +2275,18 @@ PxU32 PxwWorldHashPerEntry(PxwWorld* world, PxwEntryHash* dst, PxU32 capacity)
 			PxReal* joints = reinterpret_cast<PxReal*>(world->scratch.data() + sizeof(ArticulationPayload));
 			CaptureArticulation(entry, *payload, joints);
 			hash = FnvAccumulate(hash, payload, sizeof(ArticulationPayload) + sizeof(PxReal) * jointFloats);
+		}
+		else if (entry.kind == PxwHandleKind::eVEHICLE)
+		{
+			const PxU32 payloadBytes = PayloadSize(entry);
+			if (world->scratch.size() < payloadBytes)
+			{
+				world->scratch.resize(payloadBytes);
+			}
+			VehiclePayload* payload = reinterpret_cast<VehiclePayload*>(world->scratch.data());
+			void* blob = world->scratch.data() + sizeof(VehiclePayload);
+			CaptureVehicle(entry, *payload, blob);
+			hash = FnvAccumulate(hash, payload, payloadBytes);
 		}
 		else
 		{

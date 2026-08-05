@@ -30,6 +30,7 @@
 
 #include "PxwUndpwr.h"
 #include "PxwAPIs.h"
+#include "VehicleHelper.h"
 
 #include <cstdio>
 #include <cstring>
@@ -2411,6 +2412,439 @@ namespace
 
 		gSolverType = PxSolverType::eTGS;
 	}
+
+	// ---------------------------------------------------------------------------
+	// Vehicles
+	//
+	// A vehicle carries integrator state a plain rigid body does not: each wheel has
+	// a rotation angle and speed, a suspension jounce, and a sticky-tire timer, and an
+	// engine-drive vehicle adds engine, gearbox, autobox and clutch state. Before this
+	// suite a vehicle snapshot was just its chassis pose, so all of that was silently
+	// reset on every restore. These tests build a four-wheeled vehicle on the ground,
+	// drive it, and ask whether a rollback reproduces it -- which it can only do if the
+	// snapshot carries that state. The "at rest" variant is the sticky-tire case: the
+	// low-speed accumulator only grows once the vehicle has stopped, so a snapshot that
+	// drops it diverges precisely there.
+
+	// A four-wheeled vehicle built directly on the pxw classes so the test can set the
+	// per-wheel parameters without going through the descriptor-heavy C API.
+	PxwVehicle* BuildTestVehicle(PxScene* scene, PxPhysics* physics, PxMaterial* material, bool engineDrive)
+	{
+		PxwVehicleChassisDesc chassis;
+		chassis.mass = 1500.0f;
+		chassis.moi = PxVec3(3625.0f, 3625.0f, 3625.0f);
+		chassis.cmassLocalPose = PxwTransformData(PxTransform(PxIdentity));
+		chassis.boxHalfExtents = PxVec3(0.9f, 0.35f, 2.2f);
+		chassis.boxLocalPose = PxwTransformData(PxTransform(PxIdentity));
+
+		const PxwVehicleDriveMode::Enum mode =
+			engineDrive ? PxwVehicleDriveMode::eENGINE : PxwVehicleDriveMode::eDIRECT;
+		// NULL chassis geometry: Finalize builds the fallback box from the descriptor.
+		PxwVehicle* v = new PxwVehicle(scene, mode, chassis, NULL, material);
+
+		int nbWheelsPerAxle[2] = { 2, 2 };
+		int wheelIds[4] = { 0, 1, 2, 3 };
+		v->SetAxleDescription(2, nbWheelsPerAxle, wheelIds);
+
+		const float wheelRadius = 0.35f;
+		const PxVec3 wheelXZ[4] = {
+			PxVec3(0.8f, 0.0f, 1.4f),
+			PxVec3(-0.8f, 0.0f, 1.4f),
+			PxVec3(0.8f, 0.0f, -1.4f),
+			PxVec3(-0.8f, 0.0f, -1.4f)
+		};
+
+		for (int i = 0; i < 4; ++i)
+		{
+			PxwVehicleWheelDesc w;
+			w.radius = wheelRadius;
+			w.halfWidth = 0.15f;
+			w.mass = 20.0f;
+			w.moi = 0.5f * 20.0f * wheelRadius * wheelRadius;
+			w.dampingRate = 0.25f;
+			v->SetWheel(i, w);
+
+			PxwVehicleSuspensionDesc s;
+			s.suspensionAttachment = PxwTransformData(PxTransform(PxVec3(wheelXZ[i].x, 0.3f, wheelXZ[i].z)));
+			s.travelDir = PxVec3(0.0f, -1.0f, 0.0f);
+			s.travelDist = 0.25f;
+			s.wheelAttachment = PxwTransformData(PxTransform(PxIdentity));
+			s.stiffness = 35000.0f;
+			s.damping = 4500.0f;
+			s.sprungMass = 375.0f;
+			v->SetSuspension(i, s);
+
+			PxwVehicleSuspensionComplianceDesc c;
+			c.toeAngle = 0.0f;
+			c.camberAngle = 0.0f;
+			c.suspForceAppPoint = PxVec3(0.0f, 0.0f, 0.0f);
+			c.tireForceAppPoint = PxVec3(0.0f, 0.0f, 0.0f);
+			v->SetSuspensionCompliance(i, c);
+
+			PxwVehicleTireDesc t;
+			std::memset(&t, 0, sizeof(t));
+			t.latStiffX = 0.01f;
+			t.latStiffY = 18.0f;
+			t.longStiff = 5000.0f;
+			t.camberStiff = 0.0f;
+			t.restLoad = 3500.0f;
+			t.frictionVsSlip[0][0] = 0.0f; t.frictionVsSlip[0][1] = 1.0f;
+			t.frictionVsSlip[1][0] = 0.1f; t.frictionVsSlip[1][1] = 1.0f;
+			t.frictionVsSlip[2][0] = 1.0f; t.frictionVsSlip[2][1] = 1.0f;
+			t.loadFilter[0][0] = 0.0f; t.loadFilter[0][1] = 0.23f;
+			t.loadFilter[1][0] = 3.0f; t.loadFilter[1][1] = 3.0f;
+			v->SetTire(i, t);
+		}
+
+		if (engineDrive)
+		{
+			PxwVehicleDifferentialDesc diff;
+			std::memset(&diff, 0, sizeof(diff));
+			diff.type = PxwVehicleDifferentialType::eMULTIWHEEL;
+			for (int i = 0; i < 4; ++i)
+			{
+				diff.torqueRatios[i] = 0.25f;
+				diff.aveWheelSpeedRatios[i] = 0.25f;
+			}
+			v->SetDifferential(diff);
+		}
+		else
+		{
+			float mult[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+			v->SetDirectDriveThrottle(1000.0f, mult, 4);
+		}
+
+		PxCookingParams cooking(physics->getTolerancesScale());
+		if (!v->Finalize(physics, cooking, material))
+		{
+			std::printf("        vehicle Finalize FAILED\n");
+		}
+
+		// Drop it in just above the ground so the suspension settles onto it.
+		PxRigidBody* body = v->GetActor();
+		if (body != NULL)
+		{
+			body->setGlobalPose(PxTransform(PxVec3(0.0f, 1.0f, 0.0f)));
+		}
+
+		return v;
+	}
+
+	struct VehicleWorld
+	{
+		PxwWorld* world;
+		PxwVehicle* vehicle;
+		bool engine;
+		float throttle;
+
+		VehicleWorld() : world(NULL), vehicle(NULL), engine(false), throttle(0.0f) {}
+
+		void Build(bool engineDrive, float throttleCmd)
+		{
+			engine = engineDrive;
+			throttle = throttleCmd;
+
+			PxwSceneDesc desc = MakeDeterministicSceneDesc();
+			world = PxwWorldCreate(&desc);
+			PxwWorldSetSleepParams(world, 0.0f, 0.0f, 0u);
+
+			PxScene* scene = PxwWorldGetScene(world);
+			PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+			PxMaterial* material = physics->createMaterial(1.0f, 1.0f, 0.1f);
+
+			{
+				PxBoxGeometry groundGeom(60.0f, 1.0f, 60.0f);
+				PxShape* shape = physics->createShape(groundGeom, *material, true);
+				PxRigidStatic* ground = physics->createRigidStatic(PxTransform(PxVec3(0.0f, -1.0f, 0.0f)));
+				ground->attachShape(*shape);
+				shape->release();
+				PxwWorldRegister(world, 1u, ground, PxwHandleKind::eRIGID_STATIC);
+			}
+
+			vehicle = BuildTestVehicle(scene, physics, material, engineDrive);
+			PxwWorldRegister(world, 10u, vehicle, PxwHandleKind::eVEHICLE);
+			PxwWorldCommitPending(world);
+
+			material->release();
+		}
+
+		void Destroy()
+		{
+			if (world == NULL)
+			{
+				return;
+			}
+			if (vehicle != NULL)
+			{
+				// Managed-style teardown: unregister and commit so the vehicle leaves
+				// the scene and the per-scene step list before it is deleted, then let
+				// PxwWorldDestroy release the scene.
+				PxwWorldUnregister(world, 10u);
+				PxwWorldCommitPending(world);
+				delete vehicle;
+				vehicle = NULL;
+			}
+			PxwWorldDestroy(world);
+			world = NULL;
+		}
+
+		void ApplyInput(int /*tickIndex*/)
+		{
+			if (vehicle == NULL)
+			{
+				return;
+			}
+			vehicle->SetCommands(0.0f, 0.0f, throttle, 0.0f);
+			if (engine)
+			{
+				vehicle->SetTransmissionCommand(
+					static_cast<int>(PxVehicleEngineDriveTransmissionCommandState::eAUTOMATIC_GEAR), 0.0f);
+			}
+			else
+			{
+				vehicle->SetTransmissionCommand(
+					static_cast<int>(PxVehicleDirectDriveTransmissionCommandState::eFORWARD), 0.0f);
+			}
+		}
+
+		std::vector<PxU8> Capture()
+		{
+			std::vector<PxU8> buffer(PxwWorldStateSize(world));
+			PxU64 hash = 0;
+			const PxU32 written = PxwWorldCaptureState(world, buffer.data(), static_cast<PxU32>(buffer.size()), &hash);
+			buffer.resize(written);
+			return buffer;
+		}
+
+		PxI32 Restore(const std::vector<PxU8>& buffer)
+		{
+			return PxwWorldRestoreState(world, buffer.data(), static_cast<PxU32>(buffer.size()));
+		}
+	};
+
+	struct VehicleRunner
+	{
+		VehicleWorld world;
+		std::vector<PxU8> snapshot;
+
+		void Build(bool engineDrive, float throttleCmd)
+		{
+			world.Build(engineDrive, throttleCmd);
+			snapshot = world.Capture();
+		}
+
+		void Destroy() { world.Destroy(); }
+		void Rewind(const std::vector<PxU8>& to) { snapshot = to; }
+
+		void Tick(int tickIndex)
+		{
+			world.Restore(snapshot);
+			world.ApplyInput(tickIndex);
+			PxwWorldStep(world.world, kDt);
+			snapshot = world.Capture();
+		}
+
+		PxU64 SnapshotHash() const { return PxwHashBuffer(snapshot.data(), static_cast<PxU32>(snapshot.size())); }
+	};
+
+	const char* DriveName(bool engine) { return engine ? "engine drive" : "direct drive"; }
+
+	void TestVehicleBaselineDeterminism(bool engine)
+	{
+		std::printf("TestVehicleBaselineDeterminism [%s, %s]\n", DriveName(engine), SolverName());
+
+		VehicleRunner a, b;
+		a.Build(engine, 1.0f);
+		b.Build(engine, 1.0f);
+
+		bool identical = true;
+		for (int tick = 0; tick < 200; ++tick)
+		{
+			a.Tick(tick);
+			b.Tick(tick);
+			if (a.SnapshotHash() != b.SnapshotHash())
+			{
+				std::printf("        diverged at tick %d\n", tick);
+				identical = false;
+				break;
+			}
+		}
+		Check(identical, "two identically built vehicle worlds stay bit-identical for 200 ticks ["
+			+ std::string(DriveName(engine)) + ", " + SolverName() + "]");
+
+		a.Destroy();
+		b.Destroy();
+	}
+
+	// Capturing, restoring and capturing again has to return the same bytes, or a
+	// rollback that replays the same inputs would still nudge the state. Same shape as
+	// the rigid and articulation versions: the first capture may differ, the settled
+	// one must not.
+	void TestVehicleRestoreRoundTrip(bool engine)
+	{
+		std::printf("TestVehicleRestoreRoundTrip [%s, %s]\n", DriveName(engine), SolverName());
+
+		VehicleRunner a;
+		a.Build(engine, 1.0f);
+		for (int tick = 0; tick < 60; ++tick)
+		{
+			a.Tick(tick);
+		}
+
+		const std::vector<PxU8> first = a.world.Capture();
+		a.world.Restore(first);
+		const std::vector<PxU8> second = a.world.Capture();
+		a.world.Restore(second);
+		const std::vector<PxU8> third = a.world.Capture();
+
+		const bool settled = second.size() == third.size() &&
+			std::memcmp(second.data(), third.data(), second.size()) == 0;
+		Check(settled, "a vehicle capture is a fixed point after one round trip ["
+			+ std::string(DriveName(engine)) + ", " + SolverName() + "]");
+
+		a.Destroy();
+	}
+
+	// The shipping guarantee: a fixed prediction horizon rewinds every peer by the same
+	// amount every frame, and replaying a tick from its own snapshot must reproduce it.
+	// throttle 0 is the sticky-tire-at-rest case -- the vehicle settles and its low-speed
+	// timer grows, so a snapshot that drops the timer diverges here and nowhere else.
+	void TestVehicleFixedDepthRollback(bool engine, float throttleCmd, const char* label)
+	{
+		std::printf("TestVehicleFixedDepthRollback [%s, %s, %s]\n", label, DriveName(engine), SolverName());
+
+		const int warmup = 40;
+		const int frames = 200;
+		const int depth = 4;
+		const int historyDepth = 32;
+
+		VehicleRunner straight, rewinding;
+		straight.Build(engine, throttleCmd);
+		rewinding.Build(engine, throttleCmd);
+
+		std::vector<std::vector<PxU8> > history(historyDepth);
+
+		int tick = 0;
+		for (; tick < warmup; ++tick)
+		{
+			straight.Tick(tick);
+			rewinding.Tick(tick);
+			history[tick % historyDepth] = rewinding.snapshot;
+		}
+
+		bool matched = true;
+		int divergedAt = -1;
+		for (int frame = 0; frame < frames && matched; ++frame, ++tick)
+		{
+			straight.Tick(tick);
+
+			const int from = tick - depth;
+			rewinding.Rewind(history[from % historyDepth]);
+			for (int t = from + 1; t <= tick; ++t)
+			{
+				rewinding.Tick(t);
+				history[t % historyDepth] = rewinding.snapshot;
+			}
+
+			if (straight.snapshot.size() != rewinding.snapshot.size() ||
+				std::memcmp(straight.snapshot.data(), rewinding.snapshot.data(), straight.snapshot.size()) != 0)
+			{
+				matched = false;
+				divergedAt = frame;
+			}
+		}
+
+		std::printf("        %d frames rewinding %d ticks every frame: %s\n",
+			matched ? frames : divergedAt, depth, matched ? "still identical" : "diverged");
+		Check(matched, "a vehicle replays a fixed rewind depth exactly ["
+			+ std::string(label) + ", " + DriveName(engine) + ", " + SolverName() + "]");
+
+		straight.Destroy();
+		rewinding.Destroy();
+	}
+
+	// The phase 1 question for vehicles: peers on an adaptive horizon rewind by
+	// different depths every frame. Characterisation, like the articulation and box
+	// versions -- a "no" here would confine vehicles to a fixed horizon, not break them.
+	void TestVehicleVariableDepthRollback(bool engine, int frames)
+	{
+		std::printf("TestVehicleVariableDepthRollback [%s, %s]\n", DriveName(engine), SolverName());
+
+		const int warmup = 40;
+		const int historyDepth = 32;
+
+		VehicleRunner peerA, peerB;
+		peerA.Build(engine, 1.0f);
+		peerB.Build(engine, 1.0f);
+
+		std::vector<std::vector<PxU8> > historyA(historyDepth);
+		std::vector<std::vector<PxU8> > historyB(historyDepth);
+
+		int tick = 0;
+		for (; tick < warmup; ++tick)
+		{
+			peerA.Tick(tick);
+			peerB.Tick(tick);
+			historyA[tick % historyDepth] = peerA.snapshot;
+			historyB[tick % historyDepth] = peerB.snapshot;
+		}
+
+		bool matched = true;
+		int divergedAt = -1;
+		for (int frame = 0; frame < frames && matched; ++frame, ++tick)
+		{
+			const int depthA = 1 + (frame * 3) % 7;
+			const int depthB = 1 + (frame * 5) % 17;
+
+			const int fromA = tick - depthA;
+			peerA.Rewind(historyA[fromA % historyDepth]);
+			for (int t = fromA + 1; t <= tick; ++t)
+			{
+				peerA.Tick(t);
+				historyA[t % historyDepth] = peerA.snapshot;
+			}
+
+			const int fromB = tick - depthB;
+			peerB.Rewind(historyB[fromB % historyDepth]);
+			for (int t = fromB + 1; t <= tick; ++t)
+			{
+				peerB.Tick(t);
+				historyB[t % historyDepth] = peerB.snapshot;
+			}
+
+			if (peerA.snapshot.size() != peerB.snapshot.size() ||
+				std::memcmp(peerA.snapshot.data(), peerB.snapshot.data(), peerA.snapshot.size()) != 0)
+			{
+				matched = false;
+				divergedAt = frame;
+			}
+		}
+
+		std::printf("        %d frames of differing rollback depth: %s\n",
+			matched ? frames : divergedAt, matched ? "still identical" : "diverged");
+		Observe(matched, "a vehicle survives peers rewinding by different depths ["
+			+ std::string(DriveName(engine)) + ", " + SolverName() + "]");
+
+		peerA.Destroy();
+		peerB.Destroy();
+	}
+
+	void RunVehicleTests(PxSolverType::Enum solver)
+	{
+		gSolverType = solver;
+
+		TestVehicleBaselineDeterminism(false);
+		TestVehicleBaselineDeterminism(true);
+		TestVehicleRestoreRoundTrip(false);
+		TestVehicleRestoreRoundTrip(true);
+		TestVehicleFixedDepthRollback(false, 1.0f, "direct drive, driving");
+		TestVehicleFixedDepthRollback(false, 0.0f, "direct drive, at rest");
+		TestVehicleFixedDepthRollback(true, 1.0f, "engine drive, driving");
+		TestVehicleVariableDepthRollback(false, 400);
+		TestVehicleVariableDepthRollback(true, 400);
+
+		gSolverType = PxSolverType::eTGS;
+	}
 }
 
 int main()
@@ -2509,6 +2943,14 @@ int main()
 	RunArticulationTests(PxSolverType::eTGS);
 	std::printf("\n--- articulations under rollback (PGS) ---\n");
 	RunArticulationTests(PxSolverType::ePGS);
+
+	// Vehicles carry drivetrain integrator state a rigid body does not, and until this
+	// suite a vehicle snapshot dropped all of it. Both solvers, for the same reason the
+	// articulations run both: the vehicle is the sample game's headline dynamic body.
+	std::printf("\n--- vehicles under rollback (TGS) ---\n");
+	RunVehicleTests(PxSolverType::eTGS);
+	std::printf("\n--- vehicles under rollback (PGS) ---\n");
+	RunVehicleTests(PxSolverType::ePGS);
 
 	std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
 	return gFailures == 0 ? 0 : 1;

@@ -68,8 +68,26 @@ namespace pxw
 		void GetDriveState(PxwVehicleDriveState* dest);
 		PxRigidBody* GetActor();
 
+		// --- Rollback integrator state ---
+		// Only the state the vehicle integrates over time is (de)serialised here:
+		// per wheel, the 1D wheel rigid-body state, the suspension state and the
+		// sticky-tire timers; for engine drive, the engine, gearbox, autobox and
+		// clutch states. Everything else -- road geometry, tire slip/force, wheel
+		// poses, command responses, differential and constraint state -- is recomputed
+		// each step from params, road geometry and commands, so it is deliberately
+		// excluded: capturing it is waste, and it cannot desync. Per-tick commands
+		// (throttle, brake, steer, gear) are input and flow through the input buffer,
+		// not this snapshot. The chassis rigid body is captured separately, through its
+		// PxRigidActor, the same as any other dynamic.
+		PxwVehicleDriveMode::Enum GetDriveMode() const { return mDriveMode; }
+		PxU32 GetWheelCount() const;
+		PxU32 SnapshotSize() const;
+		bool CaptureSnapshot(void* dst, PxU32 capacity) const;
+		bool RestoreSnapshot(const void* src, PxU32 size);
+
 	private:
 		PhysXActorVehicle* ActorVehicle();
+		const PhysXActorVehicle* ActorVehicleConst() const;
 		BaseVehicleParams& Base();
 		PhysXIntegrationParams& PhysXParams();
 		void SetupCommandResponseDefaults(PxVehicleCommandResponseParams& params);
@@ -92,4 +110,11 @@ namespace pxw
 		bool mFinalized;
 		bool mInScene;
 	};
+
+	// Bytes a rollback snapshot occupies for a vehicle of this drive mode and wheel
+	// count. Exposed as a free function so the UNDPWR registry can size a vehicle's
+	// payload from the counts it caches at register time, without having to hold or
+	// dereference the vehicle -- the same way an articulation is sized from its
+	// cached DOF count. Must stay in step with PxwVehicle::CaptureSnapshot.
+	PxU32 PxwVehicleSnapshotSize(PxwVehicleDriveMode::Enum driveMode, PxU32 nbWheels);
 }

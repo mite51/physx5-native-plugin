@@ -4,6 +4,36 @@
 
 namespace pxw
 {
+	namespace
+	{
+		// The per-wheel and per-vehicle blocks of a rollback snapshot. Each holds only
+		// integrator state -- values the simulation carries from one step to the next
+		// and cannot recompute. The wrappers are zeroed before use so their padding is
+		// a constant, which keeps the per-entry hash reproducible across peers.
+		struct VehicleWheelSnapshot
+		{
+			PxVehicleWheelRigidBody1dState wheel;      // rotation angle and speed
+			PxVehicleSuspensionState       suspension; // jounce, jounce speed, separation
+			PxVehicleTireStickyState       sticky;     // time-below-threshold accumulator
+		};
+
+		struct VehicleEngineSnapshot
+		{
+			PxVehicleEngineState     engine;   // engine rotation speed
+			PxVehicleGearboxState    gearbox;  // current/target gear and in-progress shift timer
+			PxVehicleAutoboxState    autobox;  // time since last automatic shift
+			PxVehicleClutchSlipState clutch;   // clutch slip
+		};
+	}
+
+	PxU32 PxwVehicleSnapshotSize(PxwVehicleDriveMode::Enum driveMode, PxU32 nbWheels)
+	{
+		PxU32 size = nbWheels * static_cast<PxU32>(sizeof(VehicleWheelSnapshot));
+		if (driveMode == PxwVehicleDriveMode::eENGINE)
+			size += static_cast<PxU32>(sizeof(VehicleEngineSnapshot));
+		return size;
+	}
+
 	static PxVehicleAxes::Enum ToPxAxis(int axis)
 	{
 		return static_cast<PxVehicleAxes::Enum>(axis);
@@ -137,6 +167,12 @@ namespace pxw
 	}
 
 	PhysXActorVehicle* PxwVehicle::ActorVehicle()
+	{
+		if (mDirect) return mDirect;
+		return mEngine;
+	}
+
+	const PhysXActorVehicle* PxwVehicle::ActorVehicleConst() const
 	{
 		if (mDirect) return mDirect;
 		return mEngine;
@@ -619,5 +655,87 @@ namespace pxw
 		if (!ActorVehicle())
 			return NULL;
 		return ActorVehicle()->mPhysXState.physxActor.rigidBody;
+	}
+
+	PxU32 PxwVehicle::GetWheelCount() const
+	{
+		const PhysXActorVehicle* v = ActorVehicleConst();
+		return v ? v->mBaseParams.axleDescription.nbWheels : 0u;
+	}
+
+	PxU32 PxwVehicle::SnapshotSize() const
+	{
+		return PxwVehicleSnapshotSize(mDriveMode, GetWheelCount());
+	}
+
+	bool PxwVehicle::CaptureSnapshot(void* dst, PxU32 capacity) const
+	{
+		const PhysXActorVehicle* v = ActorVehicleConst();
+		if (v == NULL || dst == NULL || capacity < SnapshotSize())
+			return false;
+
+		// Wheels are written in axle order so two peers with the same axle
+		// description lay the snapshot out identically, regardless of how the
+		// underlying per-wheel arrays happen to be indexed.
+		const PxVehicleAxleDescription& axle = v->mBaseParams.axleDescription;
+		PxU8* cursor = static_cast<PxU8*>(dst);
+		for (PxU32 i = 0; i < axle.nbWheels; ++i)
+		{
+			const PxU32 wheelId = axle.wheelIdsInAxleOrder[i];
+			VehicleWheelSnapshot ws;
+			std::memset(&ws, 0, sizeof(ws));
+			ws.wheel = v->mBaseState.wheelRigidBody1dStates[wheelId];
+			ws.suspension = v->mBaseState.suspensionStates[wheelId];
+			ws.sticky = v->mBaseState.tireStickyStates[wheelId];
+			std::memcpy(cursor, &ws, sizeof(ws));
+			cursor += sizeof(ws);
+		}
+
+		if (mDriveMode == PxwVehicleDriveMode::eENGINE && mEngine != NULL)
+		{
+			VehicleEngineSnapshot es;
+			std::memset(&es, 0, sizeof(es));
+			es.engine = mEngine->mEngineDriveState.engineState;
+			es.gearbox = mEngine->mEngineDriveState.gearboxState;
+			es.autobox = mEngine->mEngineDriveState.autoboxState;
+			es.clutch = mEngine->mEngineDriveState.clutchState;
+			std::memcpy(cursor, &es, sizeof(es));
+			cursor += sizeof(es);
+		}
+
+		return true;
+	}
+
+	bool PxwVehicle::RestoreSnapshot(const void* src, PxU32 size)
+	{
+		PhysXActorVehicle* v = ActorVehicle();
+		if (v == NULL || src == NULL || size < SnapshotSize())
+			return false;
+
+		const PxVehicleAxleDescription& axle = v->mBaseParams.axleDescription;
+		const PxU8* cursor = static_cast<const PxU8*>(src);
+		for (PxU32 i = 0; i < axle.nbWheels; ++i)
+		{
+			const PxU32 wheelId = axle.wheelIdsInAxleOrder[i];
+			VehicleWheelSnapshot ws;
+			std::memcpy(&ws, cursor, sizeof(ws));
+			cursor += sizeof(ws);
+			v->mBaseState.wheelRigidBody1dStates[wheelId] = ws.wheel;
+			v->mBaseState.suspensionStates[wheelId] = ws.suspension;
+			v->mBaseState.tireStickyStates[wheelId] = ws.sticky;
+		}
+
+		if (mDriveMode == PxwVehicleDriveMode::eENGINE && mEngine != NULL)
+		{
+			VehicleEngineSnapshot es;
+			std::memcpy(&es, cursor, sizeof(es));
+			cursor += sizeof(es);
+			mEngine->mEngineDriveState.engineState = es.engine;
+			mEngine->mEngineDriveState.gearboxState = es.gearbox;
+			mEngine->mEngineDriveState.autoboxState = es.autobox;
+			mEngine->mEngineDriveState.clutchState = es.clutch;
+		}
+
+		return true;
 	}
 }
