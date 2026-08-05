@@ -254,6 +254,8 @@ extern "C" {
 
     PHYSX_WRAPPER_API void SetArticulationJointDriveVelocity(PxArticulationJointReducedCoordinate* joint, PxArticulationAxis::Enum axis, PxReal velocity);
 
+    PHYSX_WRAPPER_API void SetArticulationJointMaxVelocity(PxArticulationJointReducedCoordinate* joint, PxReal max_velocity);
+
     PHYSX_WRAPPER_API void ReleaseArticulation(PxArticulationReducedCoordinate* articulation);
 
     PHYSX_WRAPPER_API PxU32 GetArticulationLinkCount(PxArticulationReducedCoordinate* articulation);

@@ -2003,6 +2003,19 @@ void PxwWorldResetContactStateEx(PxwWorld* world, PxU32 mode)
 			// The cache is tied to the articulation, not the scene, so it survives.
 			scene->removeArticulation(*static_cast<PxArticulationReducedCoordinate*>(entry.handle));
 		}
+		else if (entry.kind == PxwHandleKind::eVEHICLE)
+		{
+			// Route through the wrapper rather than pulling the chassis out raw, so the
+			// vehicle's own scene bookkeeping stays coherent and the per-scene step list
+			// is kept in step. wakeOnLostTouch is false, as for rigids, so the reinsert
+			// does not perturb the sleep state about to be restored.
+			PxwVehicle* vehicle = AsVehicle(entry);
+			if (vehicle != NULL)
+			{
+				VehicleUnregister(vehicle);
+				vehicle->RemoveFromScene(false);
+			}
+		}
 		else
 		{
 			PxRigidActor* actor = AsRigidActor(entry);
@@ -2024,6 +2037,17 @@ void PxwWorldResetContactStateEx(PxwWorld* world, PxU32 mode)
 		if (entry.kind == PxwHandleKind::eARTICULATION)
 		{
 			scene->addArticulation(*static_cast<PxArticulationReducedCoordinate*>(entry.handle));
+		}
+		else if (entry.kind == PxwHandleKind::eVEHICLE)
+		{
+			// Mirror of the removal loop: the wrapper re-adds the chassis and the step
+			// list re-registers, exactly as AddEntryToScene does for a fresh add.
+			PxwVehicle* vehicle = AsVehicle(entry);
+			if (vehicle != NULL)
+			{
+				vehicle->AddToScene();
+				VehicleRegister(scene, vehicle);
+			}
 		}
 		else
 		{

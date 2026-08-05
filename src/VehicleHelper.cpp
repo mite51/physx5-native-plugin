@@ -537,13 +537,13 @@ namespace pxw
 		}
 	}
 
-	void PxwVehicle::RemoveFromScene()
+	void PxwVehicle::RemoveFromScene(bool wakeOnLostTouch)
 	{
 		if (!mInScene)
 			return;
 		PxRigidBody* body = GetActor();
 		if (body && body->getScene())
-			body->getScene()->removeActor(*body);
+			body->getScene()->removeActor(*body, wakeOnLostTouch);
 		mInScene = false;
 	}
 

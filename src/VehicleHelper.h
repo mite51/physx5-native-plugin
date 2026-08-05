@@ -53,7 +53,10 @@ namespace pxw
 		PxScene* Scene() const { return mScene; }
 
 		void AddToScene();
-		void RemoveFromScene();
+		// wakeOnLostTouch defaults to true to match PxScene::removeActor. A synchronised
+		// rebuild passes false so tearing the chassis out does not perturb the sleep state
+		// it is about to restore.
+		void RemoveFromScene(bool wakeOnLostTouch = true);
 
 		// --- Control (call after Finalize) ---
 		void SetCommands(float brake0, float brake1, float throttle, float steer);

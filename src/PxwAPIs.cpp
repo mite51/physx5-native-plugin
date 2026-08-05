@@ -561,9 +561,10 @@ PxArticulationReducedCoordinate* CreateArticulationRoot(PxArticulationFlag::Enum
 	if (articulation != nullptr)
 	{
 		articulation->setArticulationFlag(flag, true);
-		//TODO make separate solver iteration counts for position and velocity
-		articulation->setSolverIterationCounts(solverIterationCount, solverIterationCount); //HACK
-		//articulation->setArticulationFlag(PxArticulationFlag::eDRIVE_LIMITS_ARE_FORCES, true); //HACK
+		// The single count seeds both position and velocity iterations at creation. When a
+		// caller needs them to differ -- UNDPWR sets them from its hashed config -- it calls
+		// SetArticulationSolverIterationCounts, which takes the two separately.
+		articulation->setSolverIterationCounts(solverIterationCount, solverIterationCount);
 		articulation->setWakeCounter(0.216666f);
 	}
 	return articulation;
@@ -667,11 +668,10 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
 	joint->setDriveVelocity(axis, velocity);
  }
 
- //TODO expose
- //void SetArticulationJointMaxVelocity(PxArticulationJointReducedCoordinate* joint, PxReal max_velocity)
- //{
-	// joint->setMaxJointVelocity(max_velocity);
- //}
+ void SetArticulationJointMaxVelocity(PxArticulationJointReducedCoordinate* joint, PxReal max_velocity)
+ {
+	joint->setMaxJointVelocity(max_velocity);
+ }
 
 
  void ReleaseArticulation(PxArticulationReducedCoordinate* articulation)

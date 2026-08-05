@@ -769,6 +769,141 @@ namespace
 		peer.Destroy();
 	}
 
+	// The case TestFrameworkSleepReplays leaves untested, which Architecture.md flags: a
+	// body that is already asleep and is woken by a *new* contact inside the rolled-back
+	// window. A settled scene that only ever quietens is the easy direction for sleep to
+	// replay; the wake is the hard one, because it is a discrete transition -- a sleeper is
+	// out of the solver until the contact re-admits it -- and it has to land on exactly the
+	// same tick with exactly the same resulting state on every replay, or a rolled-back peer
+	// disagrees with a live one about who is awake.
+	//
+	// Run under PGS. A wake is a high-energy event, not the quiet settling the sibling test
+	// leans on, so only PGS's transparent cold-step replay makes a bit-exact assertion
+	// honest; PGS is the framework's chosen solver for exactly this reason (§4).
+	void TestSleeperWokenUnderRollback()
+	{
+		std::printf("TestSleeperWokenUnderRollback\n");
+
+		const PxSolverType::Enum savedSolver = gSolverType;
+		gSolverType = PxSolverType::ePGS;
+
+		const int warmup = 45;   // long enough for the stack to settle and sleep
+		const int frames = 220;
+		const int depth = 6;
+		const int historyDepth = 24;
+		const PxU32 projectileId = 900u;
+
+		// Reference: a straight cold-step run, with a sphere dropped from above that lands
+		// on the sleeping stack partway through. Registered before the first capture so the
+		// snapshot layout is fixed for the whole run.
+		SimRunner ref;
+		ref.applyInput = false;
+		ref.Build(false, true, false, kSleepLinear, kSleepAngular, kSleepTicks);
+		ref.world.SpawnDynamicSphere(projectileId, PxVec3(0.0f, 15.0f, 0.0f), 0.6f, 60.0f);
+		ref.snapshot = ref.world.Capture();
+
+		std::vector<std::vector<PxU8> > reference;
+		reference.push_back(ref.snapshot);
+
+		int sleepPeak = 0;
+		int wokeAt = -1;
+		for (int t = 0; t < warmup + frames; ++t)
+		{
+			ref.Tick(t);
+			reference.push_back(ref.snapshot);
+			const int sleeping = CountSleeping(ref.world);
+			if (sleeping > sleepPeak)
+			{
+				sleepPeak = sleeping;
+			}
+			// The first time the count drops back below its peak is the impact waking a
+			// sleeper. The falling sphere is never asleep, so it does not inflate the count.
+			if (wokeAt < 0 && sleepPeak > 0 && sleeping < sleepPeak)
+			{
+				wokeAt = t;
+			}
+		}
+		ref.Destroy();
+
+		Check(sleepPeak > 0, "the stack fell asleep before the impact");
+		Check(wokeAt >= 0, "the falling body woke a sleeper in the reference run");
+
+		// Peer: the same scene, rewound by a fixed depth and replayed to the present every
+		// frame, so the wake transition sits inside the replayed window repeatedly.
+		SimRunner peer;
+		peer.applyInput = false;
+		peer.Build(false, true, false, kSleepLinear, kSleepAngular, kSleepTicks);
+		peer.world.SpawnDynamicSphere(projectileId, PxVec3(0.0f, 15.0f, 0.0f), 0.6f, 60.0f);
+		peer.snapshot = peer.world.Capture();
+
+		std::vector<std::vector<PxU8> > history(historyDepth);
+		int tick = 0;
+		for (; tick < warmup; ++tick)
+		{
+			peer.Tick(tick);
+			history[tick % historyDepth] = peer.snapshot;
+		}
+
+		bool preWakeExact = true;   // every replayed tick strictly before the wake
+		bool wakeExact = true;      // the whole run including the wake and after
+		int firstDivergeTick = -1;
+		for (int frame = 0; frame < frames; ++frame, ++tick)
+		{
+			const int from = tick - depth;
+			peer.Rewind(history[from % historyDepth]);
+			for (int t = from + 1; t <= tick; ++t)
+			{
+				peer.Tick(t);
+				history[t % historyDepth] = peer.snapshot;
+			}
+
+			const std::vector<PxU8>& expected = reference[static_cast<size_t>(tick + 1)];
+			const bool same = peer.snapshot.size() == expected.size() &&
+				std::memcmp(peer.snapshot.data(), expected.data(), expected.size()) == 0;
+			if (!same)
+			{
+				wakeExact = false;
+				if (firstDivergeTick < 0)
+				{
+					firstDivergeTick = tick + 1;
+					DiffStateBlobs("reference -> replayed at the wake", expected, peer.snapshot, 3);
+				}
+				// A tick comfortably before the wake that diverges would be the settling
+				// replay itself breaking, which is the guaranteed part. The two-tick margin
+				// keeps the boundary between "settling" and "wake" from turning an
+				// off-by-one in wake detection into a flaky failure.
+				if (tick + 1 <= wokeAt - 2)
+				{
+					preWakeExact = false;
+				}
+			}
+		}
+
+		std::printf("        depth-%d rollback across a wake at tick %d: first divergence at tick %d\n",
+			depth, wokeAt, firstDivergeTick);
+
+		// The load-bearing guarantee: the settling that happens *before* the sleeper is
+		// woken replays bit-exactly, so the sleep flag and rest counter carried in the
+		// snapshot do their job under rollback.
+		Check(preWakeExact, "the settling before the wake replays bit-exactly under rollback");
+
+		// The wake transition itself is a characterisation, not a guarantee. Waking a
+		// sleeper builds a fresh contact whose solver warm-start the snapshot deliberately
+		// does not carry (the same state that makes a contact's point and impulse only
+		// approximate across a cold restore, Architecture.md §5). So a wake that lands
+		// inside a rolled-back window is *not* bit-exact, and it is measured here rather
+		// than asserted, with the first divergence lining up with the wake tick to show it
+		// is the wake and not the settling that moves. Gameplay must treat a rollback-
+		// spanning wake like a contact impulse: it may branch on the fact that a body woke,
+		// never on the exact tick or resulting velocity.
+		Observe(wakeExact, "a sleeper woken by a new contact replays bit-exactly under rollback");
+		Observe(firstDivergeTick < 0 || firstDivergeTick >= wokeAt,
+			"any divergence begins at the wake, not before it");
+
+		peer.Destroy();
+		gSolverType = savedSolver;
+	}
+
 
 	int CountSleeping(TestWorld& w)
 	{
@@ -3261,6 +3396,7 @@ int main()
 	TestFrameworkSleepSurvivesRestore();
 	TestSleepingBodyWakesOnContact();
 	TestFrameworkSleepReplays();
+	TestSleeperWokenUnderRollback();
 
 	// Mass properties are the one piece of setup a peer must not derive on its own,
 	// because PhysX bakes an ill-conditioned eigenvector rotation into the mass frame.
