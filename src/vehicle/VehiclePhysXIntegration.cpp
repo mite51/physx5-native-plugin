@@ -90,7 +90,12 @@ void PhysXIntegrationState::create
 		// Use the caller-supplied chassis geometry when available, otherwise fall
 		// back to a box built from the descriptor half extents.
 		const PxGeometry& chassisGeom = chassisGeometry ? *chassisGeometry : static_cast<const PxGeometry&>(boxGeom);
-		const PxVehiclePhysXRigidActorShapeParams physxActorShapeParams(chassisGeom, physxParams.physxActorBoxShapeLocalPose, defaultMaterial, PxShapeFlags(0), PxFilterData(), PxFilterData());
+		// The chassis is a simulation shape so vehicles collide with each other and with
+		// other dynamic/static rigid bodies. Zero filter data collides with everything under
+		// the scene's default filter shader. Suspension queries use PxQueryFlag::eSTATIC only
+		// (see setPhysXIntegrationParams), so a dynamic chassis is never hit by any wheel raycast.
+		// Wheels stay non-simulation (raycast driven), so they keep PxShapeFlags(0).
+		const PxVehiclePhysXRigidActorShapeParams physxActorShapeParams(chassisGeom, physxParams.physxActorBoxShapeLocalPose, defaultMaterial, PxShapeFlags(PxShapeFlag::eSIMULATION_SHAPE), PxFilterData(), PxFilterData());
 		const PxVehiclePhysXWheelParams physxWheelParams(baseParams.axleDescription, baseParams.wheelParams);
 		const PxVehiclePhysXWheelShapeParams physxWheelShapeParams(defaultMaterial, PxShapeFlags(0), PxFilterData(), PxFilterData());
 
