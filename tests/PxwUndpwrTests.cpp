@@ -2534,6 +2534,246 @@ namespace
 		peerB.Destroy();
 	}
 
+	// ---------------------------------------------------------------------------
+	// Driven articulation: the basic_articulation sample's actual configuration.
+	//
+	// The chain tests above are passive -- joints are eFREE and pushed with an
+	// external force. That leaves the joint DRIVE constraint (stiffness/damping
+	// position servo) completely unexercised, and the sample reports a driven
+	// pendulum that spins up under rollback even with an effectively zero target.
+	//
+	// This reproduces that exact setup in isolation: a fixed base, a driven upper
+	// link (Force drive, matching the sample's stiffness/damping), and a passive
+	// lower link, then compares a warm run (step continuously) against a cold run
+	// (restore its own snapshot before every step, the framework discipline). The
+	// drive target is held at zero throughout, so the only excitation is gravity;
+	// a transparent cold step settles exactly like the warm one, and a
+	// non-transparent one pumps energy into the joint and the tip speed diverges.
+
+	struct DrivenPendulumWorld
+	{
+		PxwWorld* world;
+		PxArticulationReducedCoordinate* articulation;
+		PxArticulationLink* base;
+		PxArticulationLink* upper;
+		PxArticulationLink* lower;
+		PxArticulationJointReducedCoordinate* drivenJoint;
+		PxArticulationCache* cache;
+
+		DrivenPendulumWorld()
+			: world(NULL), articulation(NULL), base(NULL), upper(NULL), lower(NULL),
+			  drivenJoint(NULL), cache(NULL) {}
+
+		static PxArticulationLink* AddLink(PxArticulationReducedCoordinate* art, PxArticulationLink* parent,
+			PxPhysics* physics, PxMaterial* material, const PxTransform& pose, const PxVec3& halfExtents, PxReal density)
+		{
+			PxArticulationLink* link = art->createLink(parent, pose);
+			PxShape* shape = physics->createShape(PxBoxGeometry(halfExtents), *material, true);
+			link->attachShape(*shape);
+			shape->release();
+			PxRigidBodyExt::updateMassAndInertia(*link, density);
+			return link;
+		}
+
+		void Build(PxReal stiffness, PxReal damping, PxReal maxForce)
+		{
+			PxwSceneDesc desc = MakeDeterministicSceneDesc();
+			world = PxwWorldCreate(&desc);
+			PxwWorldSetSleepParams(world, 0.0f, 0.0f, 0u);
+
+			PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+			PxMaterial* material = physics->createMaterial(0.6f, 0.5f, 0.1f);
+
+			articulation = physics->createArticulationReducedCoordinate();
+			articulation->setArticulationFlag(PxArticulationFlag::eFIX_BASE, true);
+			articulation->setArticulationFlag(PxArticulationFlag::eDISABLE_SELF_COLLISION, true);
+			articulation->setSolverIterationCounts(8, 2);
+
+			const PxReal anchorY = 3.0f;
+			base  = AddLink(articulation, NULL,  physics, material, PxTransform(PxVec3(0.0f, anchorY, 0.0f)),        PxVec3(0.15f, 0.15f, 0.15f), 1000.0f);
+			upper = AddLink(articulation, base,  physics, material, PxTransform(PxVec3(0.0f, anchorY - 0.6f, 0.0f)), PxVec3(0.075f, 0.45f, 0.075f), 1000.0f);
+			lower = AddLink(articulation, upper, physics, material, PxTransform(PxVec3(0.0f, anchorY - 1.45f, 0.0f)),PxVec3(0.06f, 0.40f, 0.06f), 1000.0f);
+
+			// Upper joint: hinge about swing Z, driven by a Force position drive.
+			drivenJoint = upper->getInboundJoint();
+			drivenJoint->setJointType(PxArticulationJointType::eSPHERICAL);
+			drivenJoint->setMotion(PxArticulationAxis::eSWING2, PxArticulationMotion::eFREE);
+			drivenJoint->setParentPose(PxTransform(PxVec3(0.0f, -0.15f, 0.0f)));
+			drivenJoint->setChildPose(PxTransform(PxVec3(0.0f, 0.45f, 0.0f)));
+			drivenJoint->setDriveParams(PxArticulationAxis::eSWING2,
+				PxArticulationDrive(stiffness, damping, maxForce, PxArticulationDriveType::eFORCE));
+			drivenJoint->setDriveTarget(PxArticulationAxis::eSWING2, 0.0f, false);
+
+			// Lower joint: passive hinge about swing Z.
+			PxArticulationJointReducedCoordinate* lowerJoint = lower->getInboundJoint();
+			lowerJoint->setJointType(PxArticulationJointType::eSPHERICAL);
+			lowerJoint->setMotion(PxArticulationAxis::eSWING2, PxArticulationMotion::eFREE);
+			lowerJoint->setParentPose(PxTransform(PxVec3(0.0f, -0.45f, 0.0f)));
+			lowerJoint->setChildPose(PxTransform(PxVec3(0.0f, 0.40f, 0.0f)));
+
+			material->release();
+
+			PxwWorldRegister(world, 10u, articulation, PxwHandleKind::eARTICULATION);
+			PxwWorldCommitPending(world);
+
+			cache = articulation->createCache();
+		}
+
+		void Destroy()
+		{
+			if (cache != NULL)
+			{
+				cache->release();
+				cache = NULL;
+			}
+			if (world != NULL)
+			{
+				PxwWorldDestroy(world);
+				world = NULL;
+				articulation = NULL;
+			}
+		}
+
+		void SetTarget(PxReal target)
+		{
+			drivenJoint->setDriveTarget(PxArticulationAxis::eSWING2, target, false);
+		}
+
+		void Step() { PxwWorldStep(world, kDt); }
+
+		std::vector<PxU8> Capture()
+		{
+			std::vector<PxU8> buffer(PxwWorldStateSize(world));
+			PxU64 hash = 0;
+			const PxU32 written = PxwWorldCaptureState(world, buffer.data(), static_cast<PxU32>(buffer.size()), &hash);
+			buffer.resize(written);
+			return buffer;
+		}
+
+		void Restore(const std::vector<PxU8>& buffer)
+		{
+			PxwWorldRestoreState(world, buffer.data(), static_cast<PxU32>(buffer.size()));
+		}
+
+		// Total joint speed magnitude across both dofs, read straight from the
+		// articulation -- the quantity that grows when a cold step injects energy.
+		PxReal JointSpeed()
+		{
+			articulation->copyInternalStateToCache(*cache, PxArticulationCacheFlag::eVELOCITY);
+			const PxU32 dofs = articulation->getDofs();
+			PxReal sum = 0.0f;
+			for (PxU32 i = 0; i < dofs; ++i)
+			{
+				sum += PxAbs(cache->jointVelocity[i]);
+			}
+			return sum;
+		}
+	};
+
+	void MeasureDrivenColdStep(PxReal stiffness, PxReal damping, const char* label)
+	{
+		const PxReal maxForce  = 1.0e6f;
+		const int    steps     = 300;
+
+		DrivenPendulumWorld warm, cold;
+		warm.Build(stiffness, damping, maxForce);
+		cold.Build(stiffness, damping, maxForce);
+
+		// Displace the driven joint off its rest angle so the drive and gravity both do
+		// work from the first step -- a pendulum hanging dead straight sees zero torque
+		// about the hinge and never moves, which tests nothing.
+		{
+			const PxReal startAngle = 0.5f;
+			warm.cache->jointPosition[0] = startAngle;
+			warm.cache->jointPosition[1] = 0.0f;
+			warm.articulation->applyCache(*warm.cache, PxArticulationCacheFlag::ePOSITION);
+			cold.cache->jointPosition[0] = startAngle;
+			cold.cache->jointPosition[1] = 0.0f;
+			cold.articulation->applyCache(*cold.cache, PxArticulationCacheFlag::ePOSITION);
+		}
+
+		std::vector<PxU8> coldSnapshot = cold.Capture();
+
+		PxReal warmPeak = 0.0f;
+		PxReal coldPeak = 0.0f;
+		PxReal maxDelta = 0.0f;
+
+		for (int t = 0; t < steps; ++t)
+		{
+			// The sample drives target = amplitude * sin(t * 0.05); re-applied every tick
+			// on the live and every replayed tick alike, so warm and cold see the same
+			// command sequence and any divergence is the cold step's, not the input's.
+			const PxReal target = 0.5f * PxSin(static_cast<PxReal>(t) * 0.05f);
+
+			// Warm: continuous simulation.
+			warm.SetTarget(target);
+			warm.Step();
+			const PxReal warmSpeed = warm.JointSpeed();
+
+			// Cold: restore own snapshot, then step -- the framework's confirmed-timeline
+			// discipline.
+			cold.Restore(coldSnapshot);
+			cold.SetTarget(target);
+			cold.Step();
+			coldSnapshot = cold.Capture();
+			const PxReal coldSpeed = cold.JointSpeed();
+
+			warmPeak = PxMax(warmPeak, warmSpeed);
+			coldPeak = PxMax(coldPeak, coldSpeed);
+			maxDelta = PxMax(maxDelta, PxAbs(coldSpeed - warmSpeed));
+		}
+
+		std::printf("        %-22s warm peak %.6f, cold peak %.6f, max |cold-warm| %.6f\n",
+			label, warmPeak, coldPeak, maxDelta);
+
+		// The cold timeline is the framework's confirmed timeline, so it has to track a warm
+		// continuous run. Tolerance is generous because gravity plus a stiff servo is mildly
+		// chaotic and float order-of-operations differs slightly between the two paths; the
+		// bug this guards against multiplied the tip speed several-fold, far outside this.
+		Check(maxDelta <= 0.05f * warmPeak + 1e-3f,
+			"a driven pendulum's cold step tracks the warm run [" + std::string(label)
+			+ ", " + SolverName() + "]");
+
+		warm.Destroy();
+		cold.Destroy();
+	}
+
+	// Does a capture/restore round trip preserve joint velocity, with no step in
+	// between? If the cold pendulum freezes, this is where to look.
+	void DiagnoseArticulationVelocityRoundTrip()
+	{
+		DrivenPendulumWorld w;
+		w.Build(0.0f, 0.0f, 1.0e6f);
+
+		// Displace and run a few steps so there is a real joint velocity to preserve.
+		w.cache->jointPosition[0] = 0.5f;
+		w.cache->jointPosition[1] = 0.0f;
+		w.articulation->applyCache(*w.cache, PxArticulationCacheFlag::ePOSITION);
+		for (int i = 0; i < 5; ++i) { w.Step(); }
+
+		const PxReal before = w.JointSpeed();
+		std::vector<PxU8> snap = w.Capture();
+		w.Restore(snap);
+		const PxReal after = w.JointSpeed();
+
+		std::printf("        velocity round trip (no step): before %.6f, after %.6f\n", before, after);
+		Observe(PxAbs(before - after) <= 1e-4f,
+			"capture/restore preserves articulation joint velocity ["
+			+ std::string(SolverName()) + "]");
+
+		w.Destroy();
+	}
+
+	void TestDrivenArticulationColdStepTransparency()
+	{
+		std::printf("TestDrivenArticulationColdStepTransparency [%s]\n", SolverName());
+
+		DiagnoseArticulationVelocityRoundTrip();
+		MeasureDrivenColdStep(0.0f,    0.0f,   "passive (k=0)");
+		MeasureDrivenColdStep(150.0f,  12.0f,  "medium (k=150)");
+		MeasureDrivenColdStep(1500.0f, 120.0f, "sample (k=1500)");
+	}
+
 	// Runs the articulation set under one solver.
 	void RunArticulationTests(PxSolverType::Enum solver)
 	{
@@ -2545,6 +2785,7 @@ namespace
 		TestArticulationFixedDepthRollback(4, true, "chain resting on ground");
 		TestArticulationVariableDepthRollback(false, "free-swinging chain", 600);
 		TestArticulationVariableDepthRollback(true, "chain resting on ground", 600);
+		TestDrivenArticulationColdStepTransparency();
 
 		gSolverType = PxSolverType::eTGS;
 	}

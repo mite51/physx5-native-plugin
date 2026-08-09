@@ -2,6 +2,29 @@
 
 This document describes changes made to the native plugin: first the PhysX 5.6.1 upgrade, then the robot-removal / vehicle-support refactor.
 
+## Articulation restore no longer drains joint velocity
+
+A driven articulation spun up under rollback — the `basic_articulation` sample's pendulum reached
+many times its warm-run speed even with a near-zero drive target. The cause was operation order in
+`RestoreArticulation` (`src/PxwUndpwr.cpp`): it applied the joint cache (positions and velocities)
+and only *then* called `setRootGlobalPose`. `setRootGlobalPose` recomputes every descendant link's
+world pose from the joint positions via `teleportRootLink`, and that recompute rebuilds the link
+spatial velocities as though the joints were momentarily at rest — it discards the joint velocities
+the cache had just restored. A passive chain therefore froze on every cold restore; a stiffly driven
+joint was worse, because the position servo pumped the mismatch between the drained velocity and its
+target back in as energy on every cold step.
+
+- `RestoreArticulation` now restores the root pose and root velocities *first* and applies the joint
+  cache *last*, so joint-velocity propagation is the final operation and is not clobbered.
+- `tests/PxwUndpwrTests.cpp` gains `TestDrivenArticulationColdStepTransparency`: a fixed-base driven
+  pendulum (matching the sample's stiffness/damping) run warm and cold-stepped in lockstep, asserting
+  the cold timeline tracks the warm one. Before the fix the cold peak joint speed was ~8x the warm
+  peak; after, they agree to floating-point noise under both PGS and TGS. A companion diagnostic
+  confirms a capture/restore round trip with no step preserves joint velocity, isolating the fault to
+  the step that followed a restore rather than to the cache itself.
+- No public API or snapshot-layout change; existing articulation determinism and rollback tests are
+  unaffected (134 checks, 0 failures).
+
 ## Per-link articulation contact reporting
 
 Motion policies trained with a per-body contact observation need to know which links touched

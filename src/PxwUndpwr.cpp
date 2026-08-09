@@ -930,6 +930,23 @@ namespace pxw
 
 			entry.restTicks = header.restTicks;
 
+			// Order matters, and getting it wrong is invisible until an articulation is
+			// driven. setRootGlobalPose recomputes every descendant link's world pose from
+			// the joint positions via teleportRootLink, and that recompute rebuilds the link
+			// spatial velocities as if the joints were momentarily at rest -- it discards the
+			// joint velocities. So the root state has to be restored first and the joint cache
+			// applied last, or applyCache's velocity propagation is immediately clobbered.
+			//
+			// With the calls in the other order a rewind silently drained joint velocity on
+			// every restore. A passive chain froze in place; a stiffly driven joint was worse,
+			// because the servo pumped the mismatch between the restored (near-zero) velocity
+			// and its target back in as energy every cold step, and the sample's pendulum spun
+			// up to many times its warm speed. Measured bit-transparent to a warm run under
+			// both solvers once reordered (see TestDrivenArticulationColdStepTransparency).
+			articulation->setRootGlobalPose(header.rootPose.ToPxTransform(), false);
+			articulation->setRootLinearVelocity(header.rootLinearVelocity, false);
+			articulation->setRootAngularVelocity(header.rootAngularVelocity, false);
+
 			if (header.dofCount != entry.dofCount)
 			{
 				LogMessage(PxErrorCode::eINVALID_PARAMETER,
@@ -943,10 +960,6 @@ namespace pxw
 				std::memcpy(entry.cache->jointForce, joints + entry.dofCount * 2, dofBytes);
 				articulation->applyCache(*entry.cache, kArticulationCacheFlags, false);
 			}
-
-			articulation->setRootGlobalPose(header.rootPose.ToPxTransform(), false);
-			articulation->setRootLinearVelocity(header.rootLinearVelocity, false);
-			articulation->setRootAngularVelocity(header.rootAngularVelocity, false);
 
 			if (articulation->getScene() == NULL)
 			{
