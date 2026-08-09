@@ -34,6 +34,13 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxScene* CreateScene(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu);
 
+    // CreateScene with extra PxwSceneFlag bits ORed onto its defaults. The only bit a
+    // managed caller currently needs is eENABLE_CONTACT_EVENTS (1 << 7), which installs the
+    // notification-adding filter shader and the articulation contact tracker; it changes no
+    // collision or solve decision, so the scene still simulates identically. Passing 0 is
+    // exactly CreateScene.
+    PHYSX_WRAPPER_API PxScene* CreateSceneWithFlags(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu, PxU32 extraFlags);
+
     PHYSX_WRAPPER_API void StepPhysics(PxReal dt);
 
     PHYSX_WRAPPER_API void StepPhysicsStart(PxReal dt);
@@ -287,6 +294,21 @@ extern "C" {
     PHYSX_WRAPPER_API void ApplyArticulationCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache& cache, PxArticulationCacheFlags flags);
 
     PHYSX_WRAPPER_API void CopyInternalStateToArticulationCache(PxArticulationReducedCoordinate* articulation, PxArticulationCache& cache, PxArticulationCacheFlags flags);
+
+    // Per-link contact booleans, accumulated across every step since the last
+    // ClearArticulationContactFlags. Only scenes created with
+    // PxwSceneFlag::eENABLE_CONTACT_EVENTS report anything; a scene that installs its own
+    // simulation event callback afterwards takes the events instead.
+
+    // Begins a new accumulation window. A control loop that steps physics several times
+    // per decision calls this once before the substeps, so the flags it later reads are
+    // the OR over the whole decision interval.
+    PHYSX_WRAPPER_API void ClearArticulationContactFlags();
+
+    // Writes one byte per link (0 or 1) into destFlags, indexed by
+    // PxArticulationLink::getLinkIndex, zeroing the rest of the buffer. Returns the number
+    // of links written, or 0 if the articulation has reported no contact at all.
+    PHYSX_WRAPPER_API PxU32 GetArticulationContactFlags(PxArticulationReducedCoordinate* articulation, PxU8* destFlags, PxU32 capacity);
 
     // Functions that operate on the inbound joint of an articulation link
     PHYSX_WRAPPER_API void SetArticulationLinkJointDriveParams(PxArticulationLink* link, PxArticulationAxis::Enum axis, PxReal stiffness, PxReal damping, PxReal driveMaxForce);

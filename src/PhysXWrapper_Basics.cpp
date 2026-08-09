@@ -1,4 +1,5 @@
 #include "PhysXWrapper.h"
+#include "ArticulationContacts.h"
 #include "VehicleModule.h"
 
 #define PVD_HOST "127.0.0.1"	//Set this to the IP address of the system running the PhysX Visual Debugger that you want to connect to.
@@ -153,12 +154,12 @@ namespace pxw
 		}
 	}
 
-	PxScene* PhysXWrapper::CreateScene(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu)
+	PxScene* PhysXWrapper::CreateScene(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu, PxU32 extraFlags)
 	{
 		// Preserve the historical defaults exactly so existing callers are unaffected.
 		PxwSceneDesc desc;
 		desc.gravity = *gravity;
-		desc.flags = PxwSceneFlag::eENABLE_PCM;
+		desc.flags = PxwSceneFlag::eENABLE_PCM | extraFlags;
 		desc.pruningStructureType = (PxI32)pruningStructureType;
 		desc.solverType = (PxI32)solverType;
 		desc.broadPhaseType = -1;
@@ -256,6 +257,15 @@ namespace pxw
 		{
 			PxGetFoundation().error(PxErrorCode::eINTERNAL_ERROR, __FILE__, __LINE__, "createScene returned null.\n");
 			return NULL;
+		}
+
+		if (desc.flags & PxwSceneFlag::eENABLE_CONTACT_EVENTS)
+		{
+			// The notification flags the filter shader adds are inert without a callback,
+			// so install the articulation contact tracker as the default consumer. A
+			// caller that wants the events for itself -- the UNDPWR world layer does --
+			// simply calls setSimulationEventCallback again after this returns.
+			scene->setSimulationEventCallback(&GetArticulationContactTracker());
 		}
 
 		if (!pvdDisabled)

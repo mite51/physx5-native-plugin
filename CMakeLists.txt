@@ -188,6 +188,7 @@ endif()
 set(SOURCES
     src/PxwAPIs.cpp
     src/PxwUndpwr.cpp
+    src/ArticulationContacts.cpp
     src/PhysXWrapper_Basics.cpp
     src/PhysXWrapper_Rigid_Soft_Bodies.cpp
     src/PhysXWrapper_Utils.cpp
@@ -358,44 +359,52 @@ endif()
 OPTION(BUILD_TESTS "Build the native determinism test executable." OFF)
 
 if(BUILD_TESTS)
-    add_executable(PxwUndpwrTests tests/PxwUndpwrTests.cpp ${SOURCES})
+    # A test executable that compiles the plugin sources in alongside its own.
+    function(pxw_add_plugin_test target source)
+        add_executable(${target} ${source} ${SOURCES})
 
-    target_include_directories(PxwUndpwrTests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
+        target_include_directories(${target} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+        )
 
-    # The plugin sources are compiled into the executable, so the API macro must
-    # resolve to dllexport rather than dllimport.
-    target_compile_definitions(PxwUndpwrTests PRIVATE API_EXPORTS)
+        # The plugin sources are compiled into the executable, so the API macro must
+        # resolve to dllexport rather than dllimport.
+        target_compile_definitions(${target} PRIVATE API_EXPORTS)
 
-    if(MSVC)
-        target_compile_options(PxwUndpwrTests PRIVATE /W4 /WX-)
-    else()
-        target_compile_options(PxwUndpwrTests PRIVATE -Wno-error)
-    endif()
-
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        if(USE_GPU)
-            target_link_libraries(PxwUndpwrTests PRIVATE
-                -Wl,--start-group ${PHYSX_CORE_LIBS} PhysXGpu_64 -Wl,--end-group cuda)
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /W4 /WX-)
         else()
-            target_link_libraries(PxwUndpwrTests PRIVATE
-                -Wl,--start-group ${PHYSX_CORE_LIBS} -Wl,--end-group)
+            target_compile_options(${target} PRIVATE -Wno-error)
         endif()
-        set_target_properties(PxwUndpwrTests PROPERTIES BUILD_RPATH "$ORIGIN")
-    else()
-        target_link_libraries(PxwUndpwrTests PRIVATE ${PHYSX_CORE_LIBS})
-        if(USE_GPU)
-            target_link_libraries(PxwUndpwrTests PRIVATE PhysXGpu_64)
-            if(CUDAToolkit_FOUND)
-                target_link_libraries(PxwUndpwrTests PRIVATE CUDA::cuda_driver)
+
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            if(USE_GPU)
+                target_link_libraries(${target} PRIVATE
+                    -Wl,--start-group ${PHYSX_CORE_LIBS} PhysXGpu_64 -Wl,--end-group cuda)
+            else()
+                target_link_libraries(${target} PRIVATE
+                    -Wl,--start-group ${PHYSX_CORE_LIBS} -Wl,--end-group)
+            endif()
+            set_target_properties(${target} PROPERTIES BUILD_RPATH "$ORIGIN")
+        else()
+            target_link_libraries(${target} PRIVATE ${PHYSX_CORE_LIBS})
+            if(USE_GPU)
+                target_link_libraries(${target} PRIVATE PhysXGpu_64)
+                if(CUDAToolkit_FOUND)
+                    target_link_libraries(${target} PRIVATE CUDA::cuda_driver)
+                endif()
             endif()
         endif()
-    endif()
 
-    pxw_copy_physx_dlls(PxwUndpwrTests)
-    pxw_depends_on_physx(PxwUndpwrTests)
+        pxw_copy_physx_dlls(${target})
+        pxw_depends_on_physx(${target})
+    endfunction()
+
+    pxw_add_plugin_test(PxwUndpwrTests tests/PxwUndpwrTests.cpp)
+
+    # Per-link articulation contact reporting: accumulation window semantics.
+    pxw_add_plugin_test(PxwArticulationContactTests tests/PxwArticulationContactTests.cpp)
 
     # Investigates the actor-pose round trip in PhysX itself. Links only PhysX, no
     # plugin sources, so nothing in the wrapper can influence the measurement.

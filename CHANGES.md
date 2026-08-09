@@ -2,6 +2,39 @@
 
 This document describes changes made to the native plugin: first the PhysX 5.6.1 upgrade, then the robot-removal / vehicle-support refactor.
 
+## Per-link articulation contact reporting
+
+Motion policies trained with a per-body contact observation need to know which links touched
+something during a control step. PhysX only exposes this as pair events during `fetchResults`,
+and a control loop that decimates physics spans several of those per decision, so the events have
+to be accumulated rather than sampled.
+
+- Added `src/ArticulationContacts.{h,cpp}`: `ArticulationContactTracker`, a
+  `PxSimulationEventCallback` that ORs per-link touch flags into a buffer keyed by articulation
+  and indexed by `PxArticulationLink::getLinkIndex()` (the same low-level index the articulation
+  cache uses). `Clear()` opens a new accumulation window; the caller decides how wide it is.
+  Guarded by a mutex because `onContact` may run on several PhysX worker threads.
+- `PhysXWrapper::CreateSceneEx` now installs the tracker as the simulation event callback for any
+  scene created with `PxwSceneFlag::eENABLE_CONTACT_EVENTS`. The flag already existed and already
+  selected the notification-adding filter shader; previously the events had no consumer unless the
+  caller supplied one. The UNDPWR world layer still overrides the callback with its own
+  immediately afterwards, so its behaviour is unchanged.
+- New exports `ClearArticulationContactFlags()` and
+  `GetArticulationContactFlags(articulation, destFlags, capacity)`, plus a `Forget` call in
+  `ReleaseArticulation` so a reused allocation cannot inherit stale flags.
+- No change to any collision or solve decision, so a scene simulates identically with contact
+  events on. `CMakeLists.txt` gained the new source file.
+- `tests/PxwArticulationContactTests.cpp` pins the accumulation semantics: flags OR across a
+  window, `Clear` opens a new one, reporting is per link and not per articulation, a scene without
+  the flag reports nothing, and a released articulation is forgotten. It also pins the one
+  surprise — PhysX runs no narrowphase for a sleeping island, so a resting articulation that falls
+  asleep reports no contact until something wakes it. A policy-driven articulation never sleeps,
+  since its joint targets are rewritten every step.
+- The two `BUILD_TESTS` targets that compile the plugin sources in now share a
+  `pxw_add_plugin_test` function rather than repeating the include/define/link block.
+
+---
+
 ## Robot Removal + Vehicle Support Refactor
 
 ### Legacy robot layer removed

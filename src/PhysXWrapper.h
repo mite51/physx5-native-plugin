@@ -128,7 +128,10 @@ namespace pxw {
 
 		bool GetPhysXInitStatus();
 
-		PxScene* CreateScene(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu);
+		// extraFlags is ORed onto the historical default flags, so a caller can opt into a
+		// single capability -- contact reporting, in practice -- without the whole
+		// PxwSceneDesc crossing an interop boundary. Zero reproduces the original behaviour.
+		PxScene* CreateScene(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu, PxU32 extraFlags = 0);
 
 		// Fully explicit scene creation. CreateScene above is a thin shim over this so
 		// existing callers keep their previous behaviour.

@@ -1,4 +1,5 @@
 #include "PxwAPIs.h"
+#include "ArticulationContacts.h"
 #include "VehicleHelper.h"
 #include "VehicleModule.h"
 
@@ -30,6 +31,10 @@ bool GetPhysXInitStatus() {
 
 PxScene* CreateScene(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu) {
 	return gPhysXWrapper.CreateScene(gravity, pruningStructureType, solverType, useGpu);
+}
+
+PxScene* CreateSceneWithFlags(PxVec3* gravity, PxPruningStructureType::Enum pruningStructureType, PxSolverType::Enum solverType, bool useGpu, PxU32 extraFlags) {
+	return gPhysXWrapper.CreateScene(gravity, pruningStructureType, solverType, useGpu, extraFlags);
 }
 
 void StepPhysics(PxReal dt) {
@@ -676,7 +681,20 @@ void RemoveArticulationRootFromScene(PxScene* scene, PxArticulationReducedCoordi
 
  void ReleaseArticulation(PxArticulationReducedCoordinate* articulation)
  {
+	// Drop the contact flags first: a later articulation allocated at this address would
+	// otherwise start out with whatever this one last touched.
+	pxw::GetArticulationContactTracker().Forget(articulation);
 	articulation->release();
+ }
+
+ void ClearArticulationContactFlags()
+ {
+	pxw::GetArticulationContactTracker().Clear();
+ }
+
+ PxU32 GetArticulationContactFlags(PxArticulationReducedCoordinate* articulation, PxU8* destFlags, PxU32 capacity)
+ {
+	return pxw::GetArticulationContactTracker().Read(articulation, destFlags, capacity);
  }
 
  PxU32 GetArticulationLinkCount(PxArticulationReducedCoordinate* articulation)
