@@ -2,6 +2,43 @@
 
 This document describes changes made to the native plugin: first the PhysX 5.6.1 upgrade, then the robot-removal / vehicle-support refactor.
 
+## Restoring a world that holds a parked pool slot no longer crashes
+
+Any session that used an entity pool crashed the process on its first rollback. An entity pool
+registers every slot up front and parks the ones nobody has spawned, which is what keeps the
+snapshot layout constant while players come and go. Parking goes through `ApplyEnabled`, which
+raises `PxActorFlag::eDISABLE_SIMULATION`: that tears down the body's simulation object but leaves
+the actor in the scene, so a parked slot still answers `getScene()` with the scene it is in while
+having nothing behind it to drive.
+
+`RestoreRigid` did not distinguish the two. It set velocities and cleared the force and torque
+accumulators of every dynamic it walked, and its only guard was a `getScene()` check placed *after*
+those calls, which a parked slot passes anyway. On a parked slot `clearForce` reached
+`Sc::BodySim::raiseVelocityModFlagAndNotify` through the torn-down sim and wrote through an invalid
+node index. Nothing reported it first: PhysX states the precondition as
+`PX_CHECK_AND_RETURN(!eDISABLE_SIMULATION)` on every velocity, force and sleep setter, and that is
+compiled out of a release PhysX build. `setGlobalPose` is the one call that stays legal while parked.
+
+- Added `IsSimulationDisabled` / `IsParked` helpers and guarded on them rather than on scene
+  membership. `RestoreRigid` now restores a parked slot's pose and stops there.
+- `CaptureRigid` zeroes the fields restore can no longer put back for a parked slot, so the two stay
+  symmetric — otherwise a peer that rebuilt a slot from the snapshot would report a different
+  confirmed hash than the peer that parked it.
+- `PxwBodyTeleport` had the same fault and is fixed the same way: it still places a parked body,
+  which is what a pool does on the tick it spawns one, and skips the rest until the slot is enabled.
+- `PxwBodyAddForce`, `PxwBodyAddTorque`, `PxwBodySetLinearVelocity` and `PxwBodySetAngularVelocity`
+  guarded only on scene membership and shared the same latent crash; they now no-op on a parked body.
+- `PxwWorldRestoreState` now applies an entry's parked state *before* restoring the rest of it rather
+  than after. How much of an entry can be restored depends on whether it is parked, so the two have
+  to be in the snapshot's order. With the enable applied afterwards, rewinding past a despawn left the
+  respawned body carrying whatever velocity it happened to hold: the restore had skipped the velocity
+  as belonging to a parked slot, and the enable that followed brought the body back anyway.
+- `tests/PxwUndpwrTests.cpp` gains `TestRestoreWithParkedPoolSlot`, covering capture/restore of a
+  parked slot and a rewind past a despawn. No existing test parked an entry, which is why this
+  survived: the suite covered pooling's snapshot-layout contract but never restored a world with a
+  parked slot in it. 144 checks, 0 failures.
+- No public API or snapshot-layout change.
+
 ## Articulation restore no longer drains joint velocity
 
 A driven articulation spun up under rollback — the `basic_articulation` sample's pendulum reached

@@ -1912,6 +1912,131 @@ namespace
 		material->release();
 	}
 
+	// An entity pool registers every slot up front and parks the ones nobody has spawned,
+	// which is what keeps the snapshot layout constant while players come and go. Parking
+	// raises PxActorFlag::eDISABLE_SIMULATION, and that tears down the body's simulation
+	// object while leaving the actor in the scene -- so a parked slot answers getScene()
+	// with the scene it is in but has nothing behind it to drive.
+	//
+	// The restore path did not distinguish the two and cleared the force and torque
+	// accumulators of every dynamic it walked. On a parked slot that reached
+	// BodySim::raiseVelocityModFlagAndNotify through a torn-down sim and took the process
+	// down. Nothing reported it first: the PX_CHECK_AND_RETURN that says the call is
+	// illegal is compiled out of a release PhysX build.
+	//
+	// Every peer rolls back, and a pool almost always holds an unspawned slot, so this
+	// crashed on the first rewind of any session that used one.
+	void TestRestoreWithParkedPoolSlot()
+	{
+		std::printf("TestRestoreWithParkedPoolSlot\n");
+
+		PxwSceneDesc desc = MakeDeterministicSceneDesc();
+		PxwWorld* world = PxwWorldCreate(&desc);
+
+		PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+		PxMaterial* material = physics->createMaterial(0.6f, 0.5f, 0.1f);
+
+		PxShape* groundShape = physics->createShape(PxBoxGeometry(50.0f, 1.0f, 50.0f), *material, true);
+		PxRigidStatic* ground = physics->createRigidStatic(PxTransform(PxVec3(0.0f, -1.0f, 0.0f)));
+		ground->attachShape(*groundShape);
+		groundShape->release();
+		PxwWorldRegister(world, 1, ground, PxwHandleKind::eRIGID_STATIC);
+
+		PxShape* boxShape = physics->createShape(PxBoxGeometry(0.5f, 0.5f, 0.5f), *material, true);
+
+		// One slot in play (id 10) and one nobody has spawned (id 20).
+		PxRigidDynamic* spawned = physics->createRigidDynamic(PxTransform(PxVec3(0.0f, 4.0f, 0.0f)));
+		spawned->attachShape(*boxShape);
+		PxRigidBodyExt::updateMassAndInertia(*spawned, 10.0f);
+		PxwApplyDeterministicRigidDefaults(spawned, 8, 2);
+		PxwWorldRegister(world, 10, spawned, PxwHandleKind::eRIGID_DYNAMIC);
+
+		PxRigidDynamic* parked = physics->createRigidDynamic(PxTransform(PxVec3(3.0f, 4.0f, 0.0f)));
+		parked->attachShape(*boxShape);
+		PxRigidBodyExt::updateMassAndInertia(*parked, 10.0f);
+		PxwApplyDeterministicRigidDefaults(parked, 8, 2);
+		PxwWorldRegister(world, 20, parked, PxwHandleKind::eRIGID_DYNAMIC);
+
+		boxShape->release();
+		PxwWorldCommitPending(world);
+		material->release();
+
+		PxwWorldSetEntryEnabled(world, 20, false);
+		Check(parked->getActorFlags().isSet(PxActorFlag::eDISABLE_SIMULATION),
+			"parking a pool slot disables simulation on its body");
+		Check(parked->getScene() != NULL,
+			"a parked slot stays in the scene, so scene membership cannot be used to detect it");
+
+		for (int tick = 0; tick < 10; ++tick)
+		{
+			PxwWorldStep(world, kDt);
+		}
+
+		std::vector<PxU8> snapshot(PxwWorldStateSize(world));
+		PxU64 hash = 0;
+		const PxU32 written = PxwWorldCaptureState(world, snapshot.data(), static_cast<PxU32>(snapshot.size()), &hash);
+		snapshot.resize(written);
+		Check(written > 0, "a world holding a parked pool slot captures");
+
+		// The crash.
+		const PxI32 restored = PxwWorldRestoreState(world, snapshot.data(), static_cast<PxU32>(snapshot.size()));
+		Check(restored == PxwResult::eOK, "a world holding a parked pool slot restores");
+
+		// Capture and restore have to agree on a parked slot too, or a peer that rebuilt
+		// the slot from the snapshot reports a different confirmed hash than the peer
+		// that parked it.
+		std::vector<PxU8> second(PxwWorldStateSize(world));
+		PxU64 secondHash = 0;
+		const PxU32 secondWritten = PxwWorldCaptureState(world, second.data(), static_cast<PxU32>(second.size()), &secondHash);
+		second.resize(secondWritten);
+		Check(secondWritten == written && std::memcmp(snapshot.data(), second.data(), written) == 0,
+			"capture and restore round-trip a parked pool slot losslessly");
+
+		// Spawning the slot: the pool places the body and brings it back into play.
+		PxwPose pose;
+		PxwBodyGetPose(parked, &pose);
+		PxwBodyTeleport(parked, &pose, NULL, NULL);
+		PxwWorldSetEntryEnabled(world, 20, true);
+		Check(!parked->getActorFlags().isSet(PxActorFlag::eDISABLE_SIMULATION),
+			"spawning a pool slot re-enables simulation on its body");
+
+		PxwWorldStep(world, kDt);
+		const PxI32 afterSpawn = PxwWorldRestoreState(world, snapshot.data(), static_cast<PxU32>(snapshot.size()));
+		Check(afterSpawn == PxwResult::eOK, "restoring a snapshot that parks a slot the world has spawned succeeds");
+
+		// Rewinding past a despawn: the slot is in play and moving when the snapshot is
+		// taken, parked by the time the rollback restores it. Restoring has to bring the
+		// whole body back, velocity included, which only works if the parked state is
+		// applied before the rest of the state rather than after.
+		PxwWorldSetEntryEnabled(world, 20, true);
+		const PxVec3 launch(1.5f, 0.0f, -2.5f);
+		PxwBodySetLinearVelocity(parked, &launch);
+		for (int tick = 0; tick < 3; ++tick)
+		{
+			PxwWorldStep(world, kDt);
+		}
+
+		std::vector<PxU8> inPlay(PxwWorldStateSize(world));
+		PxU64 inPlayHash = 0;
+		const PxU32 inPlayWritten = PxwWorldCaptureState(world, inPlay.data(), static_cast<PxU32>(inPlay.size()), &inPlayHash);
+		inPlay.resize(inPlayWritten);
+		PxVec3 expected(0.0f);
+		PxwBodyGetLinearVelocity(parked, &expected);
+		Check(expected.magnitudeSquared() > 0.0f, "the slot is moving when the snapshot is taken");
+
+		PxwWorldSetEntryEnabled(world, 20, false);
+		PxwWorldRestoreState(world, inPlay.data(), static_cast<PxU32>(inPlay.size()));
+
+		PxVec3 actual(0.0f);
+		PxwBodyGetLinearVelocity(parked, &actual);
+		Check(!parked->getActorFlags().isSet(PxActorFlag::eDISABLE_SIMULATION),
+			"restoring a snapshot that had the slot in play brings it back into play");
+		Check((actual - expected).magnitudeSquared() == 0.0f,
+			"rewinding past a despawn restores the slot's velocity, not just its pose");
+
+		PxwWorldDestroy(world);
+	}
+
 	// Contact events must resolve to stable IDs, normalise to idA < idB with the normal
 	// oriented A toward B, sort by the ID pair, and -- because SimGameHost drains on replay
 	// ticks too -- produce the same sorted set when a tick is replayed. A stack of two boxes
@@ -3657,6 +3782,7 @@ int main()
 	std::printf("\n--- gameplay body api and scene queries ---\n");
 	TestBodyApiAndReadPoseLayout();
 	TestDeterministicRigidDefaults();
+	TestRestoreWithParkedPoolSlot();
 	TestContactEvents();
 	TestTriggerEvents();
 	TestSceneQueries();

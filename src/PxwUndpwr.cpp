@@ -774,6 +774,25 @@ namespace pxw
 			entry.inScene = false;
 		}
 
+		// True when a slot is parked: taken out of play by ApplyEnabled, which raises
+		// PxActorFlag::eDISABLE_SIMULATION. That leaves the actor in the scene but tears
+		// down the simulation object behind it, and every velocity, force and sleep call
+		// on PxRigidDynamic is documented as illegal in that state -- only setGlobalPose
+		// stays legal. The SDK enforces it with PX_CHECK_AND_RETURN, which a release
+		// PhysX build compiles out, so an illegal call is not reported: it runs on and
+		// writes through the torn-down sim's invalid node index. Both the plugin's own
+		// bookkeeping and the flag are checked, so a world part-way through a rebuild is
+		// covered either way.
+		bool IsSimulationDisabled(const PxActor& actor)
+		{
+			return actor.getActorFlags().isSet(PxActorFlag::eDISABLE_SIMULATION);
+		}
+
+		bool IsParked(const PxwWorldEntry& entry, const PxActor& actor)
+		{
+			return !entry.enabled || IsSimulationDisabled(actor);
+		}
+
 		void CaptureRigid(const PxwWorldEntry& entry, RigidPayload& out)
 		{
 			std::memset(&out, 0, sizeof(out));
@@ -786,6 +805,17 @@ namespace pxw
 
 			out.pose = PxwTransformData(CanonicalPose(actor->getGlobalPose()));
 			out.restTicks = entry.restTicks;
+
+			if (IsParked(entry, *actor))
+			{
+				// A parked slot has no simulation object, so its pose is the whole of the
+				// state a restore is able to put back. Everything else is left zeroed to
+				// keep capture and restore symmetric: a peer that rebuilt this slot from
+				// the snapshot has to capture the same bytes as the peer that parked it,
+				// or the two disagree on the next confirmed hash.
+				out.flags |= StateFlag::eDISABLED;
+				return;
+			}
 
 			PxRigidDynamic* dynamic = actor->is<PxRigidDynamic>();
 			if (dynamic != NULL)
@@ -815,11 +845,6 @@ namespace pxw
 					}
 				}
 			}
-
-			if (!entry.enabled)
-			{
-				out.flags |= StateFlag::eDISABLED;
-			}
 		}
 
 		void RestoreRigid(PxwWorldEntry& entry, const RigidPayload& in)
@@ -830,6 +855,7 @@ namespace pxw
 				return;
 			}
 
+			// Legal on a parked slot, and the only part of its state that is.
 			actor->setGlobalPose(in.pose.ToPxTransform(), false);
 			entry.restTicks = in.restTicks;
 
@@ -845,6 +871,15 @@ namespace pxw
 				return;
 			}
 
+			// Everything below drives the simulation object a parked slot does not have.
+			// Capture zeroes the same fields for a parked slot, so skipping them here
+			// loses nothing. Restoring a rolled-back tick while any pool slot sat unspawned
+			// used to reach clearForce this way and take the process down.
+			if (dynamic->getScene() == NULL || IsParked(entry, *dynamic))
+			{
+				return;
+			}
+
 			// autowake is false throughout: waking a body that was asleep in the
 			// snapshot would silently change the simulation being restored.
 			dynamic->setLinearVelocity(in.linearVelocity, false);
@@ -853,11 +888,6 @@ namespace pxw
 			dynamic->clearForce(PxForceMode::eIMPULSE);
 			dynamic->clearTorque(PxForceMode::eFORCE);
 			dynamic->clearTorque(PxForceMode::eIMPULSE);
-
-			if (dynamic->getScene() == NULL)
-			{
-				return;
-			}
 
 			// The sleeping flag is snapshotted, so it is restored directly. An awake
 			// body has its wake counter re-pinned rather than restored: the pin is a
@@ -1275,7 +1305,7 @@ void PxwBodyAddForce(PxActor* actor, const PxVec3* force, PxU32 mode)
 		return;
 	}
 	PxRigidBody* body = actor->is<PxRigidBody>();
-	if (body == NULL || body->getScene() == NULL)
+	if (body == NULL || body->getScene() == NULL || IsSimulationDisabled(*body))
 	{
 		return;
 	}
@@ -1293,7 +1323,7 @@ void PxwBodyAddTorque(PxActor* actor, const PxVec3* torque, PxU32 mode)
 		return;
 	}
 	PxRigidBody* body = actor->is<PxRigidBody>();
-	if (body == NULL || body->getScene() == NULL)
+	if (body == NULL || body->getScene() == NULL || IsSimulationDisabled(*body))
 	{
 		return;
 	}
@@ -1340,6 +1370,15 @@ void PxwBodyTeleport(PxActor* actor, const PxwPose* pose, const PxVec3* velocity
 		return;
 	}
 
+	// Velocity, the accumulators and the wake counter all drive the simulation object,
+	// which a parked slot does not have. Placing a body that is still parked is
+	// legitimate -- the pose above is the placement -- so the rest is simply skipped;
+	// the caller enables the slot and the spawn state lands then.
+	if (dynamic->getScene() == NULL || IsSimulationDisabled(*dynamic))
+	{
+		return;
+	}
+
 	dynamic->setLinearVelocity(velocity != NULL ? *velocity : PxVec3(0.0f), false);
 	dynamic->setAngularVelocity(angularVelocity != NULL ? *angularVelocity : PxVec3(0.0f), false);
 	dynamic->clearForce(PxForceMode::eFORCE);
@@ -1349,11 +1388,7 @@ void PxwBodyTeleport(PxActor* actor, const PxwPose* pose, const PxVec3* velocity
 
 	// Re-pin the wake counter the way a restore does, so a body brought out of a pool is
 	// awake and simulated rather than inheriting whatever sleep state the slot last held.
-	// A body only carries a wake counter while it is in a scene.
-	if (dynamic->getScene() != NULL)
-	{
-		dynamic->setWakeCounter(kNeverSleepWakeCounter);
-	}
+	dynamic->setWakeCounter(kNeverSleepWakeCounter);
 }
 
 void PxwBodyGetLinearVelocity(PxActor* actor, PxVec3* outVelocity)
@@ -1375,7 +1410,7 @@ void PxwBodySetLinearVelocity(PxActor* actor, const PxVec3* velocity)
 	// The velocity setters live on PxRigidDynamic, not PxRigidBody: an articulation link
 	// is a body but its velocity is a solver output that cannot be written directly.
 	PxRigidDynamic* body = actor->is<PxRigidDynamic>();
-	if (body == NULL || body->getScene() == NULL)
+	if (body == NULL || body->getScene() == NULL || IsSimulationDisabled(*body))
 	{
 		return;
 	}
@@ -1406,7 +1441,7 @@ void PxwBodySetAngularVelocity(PxActor* actor, const PxVec3* velocity)
 	}
 	// See PxwBodySetLinearVelocity: the setter is a PxRigidDynamic member.
 	PxRigidDynamic* body = actor->is<PxRigidDynamic>();
-	if (body == NULL || body->getScene() == NULL)
+	if (body == NULL || body->getScene() == NULL || IsSimulationDisabled(*body))
 	{
 		return;
 	}
@@ -2239,25 +2274,30 @@ PxI32 PxwWorldRestoreState(PxwWorld* world, const void* src, PxU32 size)
 			continue;
 		}
 
+		// Parked state is applied before the rest, not after: how much of an entry can be
+		// restored depends on whether it is parked, so it has to match the snapshot first.
+		// With it applied afterwards, rewinding past a despawn left the respawned body on
+		// whatever velocity it happened to carry -- the restore had skipped the velocity as
+		// belonging to a parked slot, and the enable that followed brought it back anyway.
 		if (entry.kind == PxwHandleKind::eARTICULATION)
 		{
 			const ArticulationPayload* payload = reinterpret_cast<const ArticulationPayload*>(cursor);
 			const PxReal* joints = reinterpret_cast<const PxReal*>(cursor + sizeof(ArticulationPayload));
-			RestoreArticulation(entry, *payload, joints);
 			ApplyEnabled(entry, (payload->flags & StateFlag::eDISABLED) == 0);
+			RestoreArticulation(entry, *payload, joints);
 		}
 		else if (entry.kind == PxwHandleKind::eVEHICLE)
 		{
 			const VehiclePayload* payload = reinterpret_cast<const VehiclePayload*>(cursor);
 			const void* blob = cursor + sizeof(VehiclePayload);
-			RestoreVehicle(entry, *payload, blob);
 			ApplyEnabled(entry, (payload->chassis.flags & StateFlag::eDISABLED) == 0);
+			RestoreVehicle(entry, *payload, blob);
 		}
 		else
 		{
 			const RigidPayload* payload = reinterpret_cast<const RigidPayload*>(cursor);
-			RestoreRigid(entry, *payload);
 			ApplyEnabled(entry, (payload->flags & StateFlag::eDISABLED) == 0);
+			RestoreRigid(entry, *payload);
 		}
 
 		cursor += entryHeader->payloadBytes;
