@@ -69,6 +69,12 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxShape* CreateShape(PxGeometry* geometry, PxMaterial* material, bool isExclusive);
 
+    // Attaches an additional shape to a rigid actor, so one body can carry several
+    // colliders (e.g. a core sphere plus surface spheres for a spiked ball). Set the
+    // shape's local pose with SetShapeLocalPose before or after attaching; recompute the
+    // actor's mass after every shape is attached.
+    PHYSX_WRAPPER_API void AttachShape(PxActor* actor, PxShape* shape);
+
     PHYSX_WRAPPER_API void ReleaseShape(PxShape* shape);
 
     PHYSX_WRAPPER_API void AddSoftActorToScene(PxwSoftBodyHelper* softBodyHelper);

@@ -100,6 +100,11 @@ PxShape* CreateShape(PxGeometry* geometry, PxMaterial* material, bool isExclusiv
 	return gPhysXWrapper.CreateShape(geometry, material, isExclusive);
 }
 
+void AttachShape(PxActor* actor, PxShape* shape)
+{
+	static_cast<PxRigidActor*>(actor)->attachShape(*shape);
+}
+
 void ReleaseShape(PxShape* shape)
 {
 	shape->release();
