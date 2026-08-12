@@ -1690,6 +1690,311 @@ namespace
 		perturbed->release();
 	}
 
+	// Collapsing the mass frame orientation was not the whole story. A near-spherical
+	// compound also has a centre of mass that is a sum of per-shape contributions, and
+	// that sum lands a last bit apart on a peer whose floating point rounds differently.
+	// Even with the frame collapsed and the moments meaned, that residual centre-of-mass
+	// difference desyncs the body the moment it shares a solver island. The collapse
+	// path therefore snaps a near-origin centre of mass to the actor origin; this pins
+	// that it fires and that it makes two last-bit-different builds hash identically.
+	void TestIsotropyCollapseCanonicalisesCentreOfMass(int spikeCount, const char* label)
+	{
+		std::printf("TestIsotropyCollapseCanonicalisesCentreOfMass [%s]\n", label);
+
+		const std::vector<MassTestShape> shapes = MakeSpikedBallShapes(spikeCount, 0.0f);
+		PxRigidDynamic* forward = MakeMassTestBody(shapes, false);
+		PxRigidDynamic* reversed = MakeMassTestBody(shapes, true);
+
+		// The exact path (isotropyTolerance 0) keeps the summed centre of mass, which for
+		// a Fibonacci spike layout is a small but non-zero offset -- the last-bit-fragile
+		// quantity the collapse has to erase.
+		PxwMassProperties exact;
+		PxwComputeMassProperties(forward, 10.0f, 0.0f, false, &exact);
+		const PxVec3 exactCom = exact.cMassLocalPose.ToPxTransform().p;
+
+		// The default path collapses the frame and snaps the near-origin COM to exactly
+		// the actor origin.
+		PxwMassProperties a, b;
+		PxwComputeMassProperties(forward, 10.0f, -1.0f, false, &a);
+		PxwComputeMassProperties(reversed, 10.0f, -1.0f, false, &b);
+		const PxVec3 comA = a.cMassLocalPose.ToPxTransform().p;
+
+		std::printf("        exact COM %.3e m, collapsed COM %.3e m\n",
+			exactCom.magnitude(), comA.magnitude());
+
+		Check(exactCom.magnitude() > 0.0f,
+			"the raw centre of mass is a non-zero, layout-dependent offset");
+		Check(a.massFrameCollapsed == 1 && b.massFrameCollapsed == 1,
+			"a near-isotropic body collapses its mass frame");
+		Check(comA == PxVec3(0.0f),
+			"a collapsed near-origin centre of mass is snapped to the actor origin");
+		Check(PxwHashMassProperties(&a) == PxwHashMassProperties(&b),
+			"the snapped mass properties are identical whatever the shape summation order");
+
+		forward->release();
+		reversed->release();
+	}
+
+	// The snap is deliberately narrow: a body that is inertially near-spherical but has
+	// a genuinely off-centre mass -- a weighted die, a hammer head on a light handle --
+	// must keep its real centre of mass, or the fix would quietly change how such bodies
+	// behave. A single dense box offset well beyond the radius-of-gyration threshold
+	// stands in for that case.
+	void TestOffCentreMassIsPreserved()
+	{
+		std::printf("TestOffCentreMassIsPreserved\n");
+
+		// A near-spherical shell of spikes (so the frame is near-isotropic and collapses)
+		// plus one box pushed far to the side, giving a real, well-off-origin COM.
+		std::vector<MassTestShape> shapes = MakeSpikedBallShapes(24, 0.0f);
+		MassTestShape offset;
+		offset.halfExtents = PxVec3(0.3f, 0.3f, 0.3f);
+		offset.pose = PxTransform(PxVec3(2.0f, 0.0f, 0.0f));
+		shapes.push_back(offset);
+
+		PxRigidDynamic* body = MakeMassTestBody(shapes, false);
+		PxwMassProperties m;
+		PxwComputeMassProperties(body, 10.0f, -1.0f, false, &m);
+		const PxVec3 com = m.cMassLocalPose.ToPxTransform().p;
+
+		std::printf("        centre of mass %.4f m from origin\n", com.magnitude());
+		Check(com.magnitude() > 0.01f,
+			"a genuinely off-centre mass keeps its centre of mass and is not snapped to origin");
+
+		body->release();
+	}
+
+	// ---------------------------------------------------------------------------
+	// Construction hashing.
+	//
+	// A snapshot describes a body's state. It says nothing about how the body was
+	// built, and neither does any other checksum a session compares: not the state
+	// hash, not the per-entry hashes, not the internal-id hash. Yet every solve reads
+	// the construction -- the shapes, their local poses and offsets, the materials, the
+	// depenetration clamp, the iteration counts -- so two peers that build the same
+	// entity even slightly differently agree on every number they exchange and still
+	// diverge as soon as the body is loaded hard enough for the difference to matter.
+	//
+	// That is a nasty failure to diagnose, because the delay between cause and symptom
+	// is unbounded: the same one-ULP shape offset that is completely invisible while a
+	// ball rolls around on the floor desyncs it within a couple of seconds once it is
+	// squeezed between two other bodies. PxwWorldHashConstruction closes the gap by
+	// making the construction comparable, so the mismatch is reported at the body that
+	// differs rather than inferred from a divergence hundreds of ticks later.
+	//
+	// The case that most needs it is a compound of offset shapes. A spiked ball has
+	// twenty-five geometries, local poses and material bindings that all have to match,
+	// and -- because a near-isotropic compound's mass is deliberately canonicalised to
+	// an identity frame, mean moments and an origin centre of mass -- its mass hash is
+	// specifically designed NOT to reflect small shape differences. The construction
+	// hash is what is left to catch them.
+
+	// A world holding one body, built from the given shapes, for comparing how two
+	// peers constructed the same entity.
+	struct ConstructionTestWorld
+	{
+		PxwWorld* world;
+		PxRigidDynamic* body;
+
+		ConstructionTestWorld() : world(NULL), body(NULL) {}
+
+		void Build(const std::vector<MassTestShape>& shapes, PxReal friction, PxReal maxDepenetration)
+		{
+			PxwSceneDesc desc = MakeDeterministicSceneDesc();
+			world = PxwWorldCreate(&desc);
+
+			PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+			PxMaterial* material = physics->createMaterial(friction, 0.5f, 0.1f);
+			body = physics->createRigidDynamic(PxTransform(PxVec3(0.0f, 5.0f, 0.0f)));
+
+			for (size_t i = 0; i < shapes.size(); ++i)
+			{
+				PxShape* shape = physics->createShape(PxBoxGeometry(shapes[i].halfExtents), *material, true);
+				shape->setLocalPose(shapes[i].pose);
+				body->attachShape(*shape);
+				shape->release();
+			}
+			material->release();
+
+			PxwSetupDeterministicMass(body, 10.0f, -1.0f, false, NULL);
+			PxwApplyDeterministicRigidDefaults(body, 8, 2);
+			body->setMaxDepenetrationVelocity(maxDepenetration);
+
+			PxwWorldRegister(world, 100, body, PxwHandleKind::eRIGID_DYNAMIC);
+			PxwWorldCommitPending(world);
+		}
+
+		PxU64 Hash() const { return PxwWorldHashConstruction(world); }
+
+		void Destroy()
+		{
+			if (world != NULL)
+			{
+				PxwWorldDestroy(world);
+				world = NULL;
+				body = NULL;
+			}
+		}
+	};
+
+	// Nudges one component of one shape's local pose by a single representable step,
+	// the smallest difference two peers can possibly have.
+	std::vector<MassTestShape> NudgeOneShapeByOneUlp(const std::vector<MassTestShape>& shapes)
+	{
+		std::vector<MassTestShape> out = shapes;
+		if (out.size() > 1)
+		{
+			PxU32 bits;
+			std::memcpy(&bits, &out[1].pose.p.x, sizeof(bits));
+			++bits;
+			std::memcpy(&out[1].pose.p.x, &bits, sizeof(bits));
+		}
+		return out;
+	}
+
+	void TestConstructionHashAgreesForIdenticalBuilds()
+	{
+		std::printf("TestConstructionHashAgreesForIdenticalBuilds\n");
+
+		const std::vector<MassTestShape> shapes = MakeSpikedBallShapes(24, 0.0f);
+
+		ConstructionTestWorld a, b;
+		a.Build(shapes, 0.6f, 3.0f);
+		b.Build(shapes, 0.6f, 3.0f);
+
+		Check(a.Hash() == b.Hash(),
+			"two worlds whose bodies were built the same way hash identically");
+
+		// The construction does not change as the simulation runs, so it must survive
+		// stepping. A hash that drifted would be useless for comparing peers mid-session.
+		const PxU64 before = a.Hash();
+		for (int i = 0; i < 30; ++i)
+		{
+			PxwWorldStep(a.world, 1.0f / 60.0f);
+		}
+		Check(a.Hash() == before, "the construction hash is unchanged by stepping the world");
+
+		a.Destroy();
+		b.Destroy();
+	}
+
+	// The headline case, and the reason this hash exists. A single ULP in one spike's
+	// local pose leaves the mass properties and the whole state blob identical -- the
+	// mass is canonicalised precisely so that it does -- while genuinely changing the
+	// body PhysX solves.
+	void TestConstructionHashCatchesWhatMassAndStateHashesMiss()
+	{
+		std::printf("TestConstructionHashCatchesWhatMassAndStateHashesMiss\n");
+
+		const std::vector<MassTestShape> shapes = MakeSpikedBallShapes(24, 0.0f);
+		const std::vector<MassTestShape> nudged = NudgeOneShapeByOneUlp(shapes);
+
+		ConstructionTestWorld reference, perturbed;
+		reference.Build(shapes, 0.6f, 3.0f);
+		perturbed.Build(nudged, 0.6f, 3.0f);
+
+		PxwMassProperties massA, massB;
+		PxwGetMassProperties(reference.body, &massA);
+		PxwGetMassProperties(perturbed.body, &massB);
+
+		const bool massAgrees = PxwHashMassProperties(&massA) == PxwHashMassProperties(&massB);
+		const bool stateAgrees = PxwWorldHashState(reference.world) == PxwWorldHashState(perturbed.world);
+		const bool constructionAgrees = reference.Hash() == perturbed.Hash();
+
+		std::printf("        one spike moved by 1 ULP: mass hash %s, state hash %s, construction hash %s\n",
+			massAgrees ? "AGREES" : "differs",
+			stateAgrees ? "AGREES" : "differs",
+			constructionAgrees ? "AGREES" : "differs");
+
+		Check(massAgrees,
+			"a one-ULP shape offset leaves the canonicalised mass properties identical");
+		Check(stateAgrees,
+			"a one-ULP shape offset leaves the state hash identical");
+		Check(!constructionAgrees,
+			"the construction hash notices a one-ULP shape offset that every other hash misses");
+
+		reference.Destroy();
+		perturbed.Destroy();
+	}
+
+	// The other properties that reach the solver without ever reaching a snapshot. The
+	// depenetration clamp is the sharpest of them: it does nothing at all until bodies
+	// are deeply overlapped, so a mismatch stays invisible until something squeezes.
+	void TestConstructionHashCatchesSolverProperties()
+	{
+		std::printf("TestConstructionHashCatchesSolverProperties\n");
+
+		const std::vector<MassTestShape> shapes = MakeSpikedBallShapes(24, 0.0f);
+
+		ConstructionTestWorld reference, clamp, friction, iterations;
+		reference.Build(shapes, 0.6f, 3.0f);
+		clamp.Build(shapes, 0.6f, PX_MAX_F32);
+		friction.Build(shapes, 0.6000001f, 3.0f);
+		iterations.Build(shapes, 0.6f, 3.0f);
+		iterations.body->setSolverIterationCounts(9, 2);
+
+		Check(reference.Hash() != clamp.Hash(),
+			"the construction hash notices a different max depenetration velocity");
+		Check(reference.Hash() != friction.Hash(),
+			"the construction hash notices a different material friction");
+		Check(reference.Hash() != iterations.Hash(),
+			"the construction hash notices different solver iteration counts");
+
+		// Shapes are hashed in attachment order, because PhysX generates contacts in that
+		// order: the same shapes attached differently are not the same body.
+		ConstructionTestWorld reversed;
+		std::vector<MassTestShape> backwards(shapes.rbegin(), shapes.rend());
+		reversed.Build(backwards, 0.6f, 3.0f);
+		Check(reference.Hash() != reversed.Hash(),
+			"the construction hash notices a different shape attachment order");
+
+		reference.Destroy();
+		clamp.Destroy();
+		friction.Destroy();
+		iterations.Destroy();
+		reversed.Destroy();
+	}
+
+	// A whole-world hash says only that something differs. The per-entry form has to
+	// name which body, or a session with fifty actors is no better off.
+	void TestConstructionHashPerEntryNamesTheBody()
+	{
+		std::printf("TestConstructionHashPerEntryNamesTheBody\n");
+
+		const std::vector<MassTestShape> shapes = MakeSpikedBallShapes(24, 0.0f);
+		const std::vector<MassTestShape> nudged = NudgeOneShapeByOneUlp(shapes);
+
+		ConstructionTestWorld reference, perturbed;
+		reference.Build(shapes, 0.6f, 3.0f);
+		perturbed.Build(nudged, 0.6f, 3.0f);
+
+		PxwEntryHash a[8];
+		PxwEntryHash b[8];
+		const PxU32 countA = PxwWorldHashConstructionPerEntry(reference.world, a, 8);
+		const PxU32 countB = PxwWorldHashConstructionPerEntry(perturbed.world, b, 8);
+
+		Check(countA == countB && countA > 0, "both worlds report the same number of entries");
+
+		int mismatches = 0;
+		PxU32 mismatchedId = 0;
+		for (PxU32 i = 0; i < countA && i < countB; ++i)
+		{
+			if (a[i].stableId != b[i].stableId || a[i].hash != b[i].hash)
+			{
+				++mismatches;
+				mismatchedId = a[i].stableId;
+			}
+		}
+
+		std::printf("        %d of %u entries differ, first is stable id %u\n",
+			mismatches, countA, mismatchedId);
+		Check(mismatches == 1 && mismatchedId == 100,
+			"exactly the body that was built differently is reported as differing");
+
+		reference.Destroy();
+		perturbed.Destroy();
+	}
+
 	// Applying replicated properties must be verbatim, otherwise replicating them
 	// solves nothing.
 	void TestApplyMassIsVerbatim()
@@ -3773,6 +4078,12 @@ int main()
 	TestMassIgnoresAttachOrder(42, "42 spikes");
 	TestIsotropyCollapseStabilisesMassFrame(12, "12 spikes");
 	TestIsotropyCollapseStabilisesMassFrame(42, "42 spikes");
+	TestIsotropyCollapseCanonicalisesCentreOfMass(24, "24 spikes");
+	TestOffCentreMassIsPreserved();
+	TestConstructionHashAgreesForIdenticalBuilds();
+	TestConstructionHashCatchesWhatMassAndStateHashesMiss();
+	TestConstructionHashCatchesSolverProperties();
+	TestConstructionHashPerEntryNamesTheBody();
 	TestApplyMassIsVerbatim();
 	TestMassHashDetectsMismatch();
 	TestCollapsedMassKeepsPoseRoundTripExact();

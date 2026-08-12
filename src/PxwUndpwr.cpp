@@ -6,8 +6,10 @@
 #include "VehicleModule.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <vector>
+#include <xmmintrin.h>
 
 using namespace physx;
 
@@ -33,6 +35,42 @@ namespace pxw
 		// float: the counter is a fixed point rather than merely a large number, and a
 		// body pinned here never reaches the sleep branch at all, for any timestep.
 		const PxReal kNeverSleepWakeCounter = PX_MAX_F32;
+
+		// The floating-point environment the solver runs in is inherited from whatever
+		// thread calls the step. Unity's job system and Burst set flush-to-zero and
+		// denormals-are-zero on the threads they touch, and nothing promises two processes
+		// leave the stepping thread in the same mode. A mismatch changes how the solver
+		// treats sub-normal values in a stiff contact, which surfaces as a physics-only
+		// desync the instant two bodies press on a third -- with identical inputs, state
+		// and registration order, on the same machine, with no rollback involved. So the
+		// step pins a canonical mode (round to nearest, denormals kept) around the solve
+		// and restores the caller's afterwards. See CrossPlatformDeterminism.md, step 4.
+		const PxU32 kMxcsrFtz = 0x8000u;    // flush-to-zero
+		const PxU32 kMxcsrDaz = 0x0040u;    // denormals-are-zero
+		const PxU32 kMxcsrRcMask = 0x6000u; // rounding control (00 = round to nearest)
+
+		// Steps for which the inherited MXCSR is logged, so two peers can be compared by
+		// eye. Diagnostic only; costs nothing once it reaches zero.
+		int gFpuDiagLogsLeft = 6;
+
+		PxU32 ReadMxcsr()
+		{
+			return _mm_getcsr();
+		}
+
+		// Clears flush-to-zero, denormals-are-zero and any non-nearest rounding, and
+		// returns the previous MXCSR so the caller's environment can be put back.
+		PxU32 CanonicaliseFpu()
+		{
+			const PxU32 previous = _mm_getcsr();
+			_mm_setcsr(previous & ~(kMxcsrFtz | kMxcsrDaz | kMxcsrRcMask));
+			return previous;
+		}
+
+		void RestoreFpu(PxU32 previous)
+		{
+			_mm_setcsr(previous);
+		}
 
 		// Articulation cache subset that is both readable and writable. Link
 		// velocities and accelerations are outputs and cannot be applied, so they are
@@ -292,6 +330,7 @@ namespace pxw
 		PxScene* scene;
 		std::vector<PxwWorldEntry> entries;
 		bool simulating;
+		PxU32 savedFpu;   // caller's MXCSR, held across simulate->fetchResults and restored after
 		std::vector<PxU8> scratch;
 		WorldEventCallback events;
 
@@ -323,7 +362,7 @@ namespace pxw
 		std::vector<ActorLookup> actorLookup;
 
 		PxwWorld()
-			: scene(NULL), simulating(false),
+			: scene(NULL), simulating(false), savedFpu(0u),
 			  sleepLinThresholdSq(0.0f), sleepAngThresholdSq(0.0f), sleepTicks(0) {}
 
 		// Resolves a scene actor to its stable ID and kind, or returns false when the
@@ -1594,6 +1633,8 @@ PxI32 PxwComputeMassProperties(PxRigidBody* actor, PxReal density, PxReal isotro
 		return PxwResult::eBAD_FORMAT;
 	}
 
+	PxVec3 centerOfMass = total.centerOfMass;
+
 	if (out->anisotropy <= isotropyTolerance)
 	{
 		// The body is inertially close enough to a sphere that its principal axes carry
@@ -1605,6 +1646,23 @@ PxI32 PxwComputeMassProperties(PxRigidBody* actor, PxReal density, PxReal isotro
 		diagonal = PxVec3(mean, mean, mean);
 		massFrame = PxQuat(PxIdentity);
 		out->massFrameCollapsed = 1;
+
+		// Collapsing the frame is not enough on its own. A near-spherical compound --
+		// a core sphere with a ring of offset spikes, say -- also has a centre of mass
+		// that is a sum of per-shape contributions, and that sum is a last-bit
+		// different on a peer whose floating point rounds differently. A COM that far
+		// off origin is indistinguishable from origin for a body this close to a
+		// uniform sphere, so snap it: a tiny, physically meaningless offset is not
+		// worth a desync the moment the body shares a solver island. The threshold is
+		// a fraction of the radius of gyration sqrt(meanI / mass), the body's own
+		// length scale, so it scales with the body rather than being an absolute epsilon.
+		const PxReal radiusOfGyration = (mean > 0.0f && total.mass > 0.0f)
+			? PxSqrt(mean / total.mass) : 0.0f;
+		const PxReal snapThreshold = 0.001f * radiusOfGyration;
+		if (centerOfMass.magnitude() <= snapThreshold)
+		{
+			centerOfMass = PxVec3(0.0f);
+		}
 	}
 	else
 	{
@@ -1624,7 +1682,7 @@ PxI32 PxwComputeMassProperties(PxRigidBody* actor, PxReal density, PxReal isotro
 
 	out->mass = total.mass;
 	out->inertia = diagonal;
-	out->cMassLocalPose = PxwPose(PxTransform(total.centerOfMass, massFrame));
+	out->cMassLocalPose = PxwPose(PxTransform(centerOfMass, massFrame));
 	out->shapeCount = static_cast<PxU32>(props.size());
 
 	return PxwResult::eOK;
@@ -1958,6 +2016,26 @@ void PxwWorldSimulate(PxwWorld* world, PxReal dt)
 		return;
 	}
 	world->simulating = true;
+
+	// Log the inherited FP mode for the first few steps, then pin a canonical one for the
+	// solve. The solve runs on this calling thread (0 worker threads), so pinning here and
+	// restoring in fetchResults covers the whole step regardless of what Unity left the
+	// thread in. Restored after fetchResults, so the C#-side read of the MXCSR still shows
+	// the caller's own value for comparison.
+	if (gFpuDiagLogsLeft > 0)
+	{
+		--gFpuDiagLogsLeft;
+		const PxU32 csr = ReadMxcsr();
+		char buffer[192];
+		std::snprintf(buffer, sizeof(buffer),
+			"UNDPWR: stepping-thread MXCSR = 0x%04X (FTZ=%u DAZ=%u RC=%u) before the solve; "
+			"pinning round-to-nearest with denormals kept.\n",
+			csr, (csr & kMxcsrFtz) ? 1u : 0u, (csr & kMxcsrDaz) ? 1u : 0u,
+			(csr & kMxcsrRcMask) >> 13);
+		PxwLog(PxwLogSeverity::eINFO, buffer);
+	}
+	world->savedFpu = CanonicaliseFpu();
+
 	// Contacts and triggers are reported during fetchResults; clear the buffers here so
 	// they hold exactly this step's events when the drain runs afterwards.
 	world->events.Clear();
@@ -1974,8 +2052,12 @@ void PxwWorldFetchResults(PxwWorld* world)
 	world->simulating = false;
 
 	// After fetchResults so it sees post-step velocities, and before the caller
-	// captures, so the sleep decision it makes is part of the recorded state.
+	// captures, so the sleep decision it makes is part of the recorded state. Runs
+	// under the pinned mode too, so its threshold comparisons match on every peer.
 	UpdateSleepForWorld(*world);
+
+	// The solve is done; hand the thread back to the caller in the mode it had.
+	RestoreFpu(world->savedFpu);
 }
 
 void PxwWorldStep(PxwWorld* world, PxReal dt)
@@ -2513,6 +2595,304 @@ PxU64 PxwWorldHashInternalIds(PxwWorld* world)
 	}
 
 	return hash;
+}
+
+// ------------------------------------------------------- construction hashing ----
+//
+// A snapshot carries a body's state: where it is, how fast it is going, whether it is
+// asleep. It does not carry how the body was BUILT -- its shapes, their local poses and
+// offsets, its materials, its solver iteration counts, its depenetration clamp, its mass.
+// Every one of those is read by every solve, and none of them appear in the state hash,
+// the per-entry hashes or the internal-id hash. Two peers that construct the same body
+// even slightly differently therefore agree on every checksum a session compares, and
+// still diverge the moment the body is loaded hard enough for the difference to matter.
+//
+// That failure is unusually cruel to a compound with offset shapes. A single sphere has
+// one geometry, one local pose and one material to get right; the spiked ball has
+// twenty-five of each, and the mass canonicalisation that makes its mass frame stable
+// across peers also throws away the detail that would otherwise have exposed a shape-level
+// difference in the mass hash. So the surface where peers can silently disagree is
+// twenty-five times larger precisely where the evidence is weakest.
+//
+// These hashes close that gap. Peers exchange them once when the world is built and again
+// after a rebuild; a mismatch names construction as the cause immediately, at the body
+// that differs, instead of surfacing hundreds of ticks later as an unexplained physics
+// desync. Nothing here is addressable memory: meshes are identified by their vertex and
+// element counts, never by pointer, so the hash is comparable across processes.
+
+namespace
+{
+	PxU64 HashGeometryConstruction(PxU64 hash, const PxGeometry& geometry)
+	{
+		const PxU32 type = static_cast<PxU32>(geometry.getType());
+		hash = FnvAccumulate(hash, &type, sizeof(type));
+
+		switch (geometry.getType())
+		{
+		case PxGeometryType::eSPHERE:
+		{
+			const PxSphereGeometry& g = static_cast<const PxSphereGeometry&>(geometry);
+			hash = FnvAccumulate(hash, &g.radius, sizeof(g.radius));
+			break;
+		}
+		case PxGeometryType::eCAPSULE:
+		{
+			const PxCapsuleGeometry& g = static_cast<const PxCapsuleGeometry&>(geometry);
+			hash = FnvAccumulate(hash, &g.radius, sizeof(g.radius));
+			hash = FnvAccumulate(hash, &g.halfHeight, sizeof(g.halfHeight));
+			break;
+		}
+		case PxGeometryType::eBOX:
+		{
+			const PxBoxGeometry& g = static_cast<const PxBoxGeometry&>(geometry);
+			hash = FnvAccumulate(hash, &g.halfExtents, sizeof(g.halfExtents));
+			break;
+		}
+		case PxGeometryType::eCONVEXMESH:
+		{
+			const PxConvexMeshGeometry& g = static_cast<const PxConvexMeshGeometry&>(geometry);
+			hash = FnvAccumulate(hash, &g.scale, sizeof(g.scale));
+			// Counts rather than the mesh pointer: the address differs between two
+			// processes that cooked the identical mesh.
+			const PxU32 vertices = g.convexMesh != NULL ? g.convexMesh->getNbVertices() : 0;
+			const PxU32 polygons = g.convexMesh != NULL ? g.convexMesh->getNbPolygons() : 0;
+			hash = FnvAccumulate(hash, &vertices, sizeof(vertices));
+			hash = FnvAccumulate(hash, &polygons, sizeof(polygons));
+			break;
+		}
+		case PxGeometryType::eTRIANGLEMESH:
+		{
+			const PxTriangleMeshGeometry& g = static_cast<const PxTriangleMeshGeometry&>(geometry);
+			hash = FnvAccumulate(hash, &g.scale, sizeof(g.scale));
+			const PxU32 vertices = g.triangleMesh != NULL ? g.triangleMesh->getNbVertices() : 0;
+			const PxU32 triangles = g.triangleMesh != NULL ? g.triangleMesh->getNbTriangles() : 0;
+			hash = FnvAccumulate(hash, &vertices, sizeof(vertices));
+			hash = FnvAccumulate(hash, &triangles, sizeof(triangles));
+			break;
+		}
+		case PxGeometryType::eHEIGHTFIELD:
+		{
+			const PxHeightFieldGeometry& g = static_cast<const PxHeightFieldGeometry&>(geometry);
+			hash = FnvAccumulate(hash, &g.rowScale, sizeof(g.rowScale));
+			hash = FnvAccumulate(hash, &g.columnScale, sizeof(g.columnScale));
+			hash = FnvAccumulate(hash, &g.heightScale, sizeof(g.heightScale));
+			const PxU32 rows = g.heightField != NULL ? g.heightField->getNbRows() : 0;
+			const PxU32 columns = g.heightField != NULL ? g.heightField->getNbColumns() : 0;
+			hash = FnvAccumulate(hash, &rows, sizeof(rows));
+			hash = FnvAccumulate(hash, &columns, sizeof(columns));
+			break;
+		}
+		default:
+			break;
+		}
+
+		return hash;
+	}
+
+	PxU64 HashShapeConstruction(PxU64 hash, const PxShape& shape)
+	{
+		hash = HashGeometryConstruction(hash, shape.getGeometry());
+
+		// The offset local pose: the whole point of this exercise. A one-ULP difference
+		// here is invisible to every other checksum and desyncs a squeezed compound.
+		const PxTransform localPose = shape.getLocalPose();
+		hash = FnvAccumulate(hash, &localPose, sizeof(localPose));
+
+		const PxReal contactOffset = shape.getContactOffset();
+		const PxReal restOffset = shape.getRestOffset();
+		const PxU32 shapeFlags = static_cast<PxU32>(shape.getFlags());
+		hash = FnvAccumulate(hash, &contactOffset, sizeof(contactOffset));
+		hash = FnvAccumulate(hash, &restOffset, sizeof(restOffset));
+		hash = FnvAccumulate(hash, &shapeFlags, sizeof(shapeFlags));
+
+		const PxFilterData simulationFilter = shape.getSimulationFilterData();
+		const PxFilterData queryFilter = shape.getQueryFilterData();
+		hash = FnvAccumulate(hash, &simulationFilter, sizeof(simulationFilter));
+		hash = FnvAccumulate(hash, &queryFilter, sizeof(queryFilter));
+
+		const PxU32 materialCount = shape.getNbMaterials();
+		hash = FnvAccumulate(hash, &materialCount, sizeof(materialCount));
+		for (PxU32 i = 0; i < materialCount; ++i)
+		{
+			PxMaterial* material = NULL;
+			if (shape.getMaterials(&material, 1, i) != 1 || material == NULL)
+			{
+				continue;
+			}
+			const PxReal staticFriction = material->getStaticFriction();
+			const PxReal dynamicFriction = material->getDynamicFriction();
+			const PxReal restitution = material->getRestitution();
+			const PxU32 frictionCombine = static_cast<PxU32>(material->getFrictionCombineMode());
+			const PxU32 restitutionCombine = static_cast<PxU32>(material->getRestitutionCombineMode());
+			const PxU32 materialFlags = static_cast<PxU32>(material->getFlags());
+			hash = FnvAccumulate(hash, &staticFriction, sizeof(staticFriction));
+			hash = FnvAccumulate(hash, &dynamicFriction, sizeof(dynamicFriction));
+			hash = FnvAccumulate(hash, &restitution, sizeof(restitution));
+			hash = FnvAccumulate(hash, &frictionCombine, sizeof(frictionCombine));
+			hash = FnvAccumulate(hash, &restitutionCombine, sizeof(restitutionCombine));
+			hash = FnvAccumulate(hash, &materialFlags, sizeof(materialFlags));
+		}
+
+		return hash;
+	}
+
+	// Shapes are hashed in attachment order, which is itself part of the construction:
+	// PhysX generates contacts per shape in this order, so two peers that attached the
+	// same shapes differently are not built the same way even though the set matches.
+	PxU64 HashRigidActorConstruction(PxU64 hash, PxRigidActor& actor)
+	{
+		const PxU32 actorFlags = static_cast<PxU32>(actor.getActorFlags());
+		hash = FnvAccumulate(hash, &actorFlags, sizeof(actorFlags));
+
+		const PxU32 shapeCount = actor.getNbShapes();
+		hash = FnvAccumulate(hash, &shapeCount, sizeof(shapeCount));
+		for (PxU32 i = 0; i < shapeCount; ++i)
+		{
+			PxShape* shape = NULL;
+			if (actor.getShapes(&shape, 1, i) != 1 || shape == NULL)
+			{
+				continue;
+			}
+			hash = HashShapeConstruction(hash, *shape);
+		}
+
+		PxRigidBody* body = actor.is<PxRigidBody>();
+		if (body == NULL)
+		{
+			return hash;
+		}
+
+		// Mass is included even though PxwSetupDeterministicMass already canonicalises it,
+		// because a body whose mass was authored rather than computed never went through
+		// that path and can still differ.
+		const PxReal mass = body->getMass();
+		const PxVec3 inertia = body->getMassSpaceInertiaTensor();
+		const PxTransform cMass = body->getCMassLocalPose();
+		const PxU32 bodyFlags = static_cast<PxU32>(body->getRigidBodyFlags());
+		const PxReal linearDamping = body->getLinearDamping();
+		const PxReal angularDamping = body->getAngularDamping();
+		const PxReal maxLinearVelocity = body->getMaxLinearVelocity();
+		const PxReal maxAngularVelocity = body->getMaxAngularVelocity();
+		const PxReal maxDepenetration = body->getMaxDepenetrationVelocity();
+		const PxReal maxContactImpulse = body->getMaxContactImpulse();
+		hash = FnvAccumulate(hash, &mass, sizeof(mass));
+		hash = FnvAccumulate(hash, &inertia, sizeof(inertia));
+		hash = FnvAccumulate(hash, &cMass, sizeof(cMass));
+		hash = FnvAccumulate(hash, &bodyFlags, sizeof(bodyFlags));
+		hash = FnvAccumulate(hash, &linearDamping, sizeof(linearDamping));
+		hash = FnvAccumulate(hash, &angularDamping, sizeof(angularDamping));
+		hash = FnvAccumulate(hash, &maxLinearVelocity, sizeof(maxLinearVelocity));
+		hash = FnvAccumulate(hash, &maxAngularVelocity, sizeof(maxAngularVelocity));
+		hash = FnvAccumulate(hash, &maxDepenetration, sizeof(maxDepenetration));
+		hash = FnvAccumulate(hash, &maxContactImpulse, sizeof(maxContactImpulse));
+
+		PxRigidDynamic* dynamic = actor.is<PxRigidDynamic>();
+		if (dynamic != NULL)
+		{
+			PxU32 positionIters = 0;
+			PxU32 velocityIters = 0;
+			dynamic->getSolverIterationCounts(positionIters, velocityIters);
+			const PxReal sleepThreshold = dynamic->getSleepThreshold();
+			const PxReal stabilizationThreshold = dynamic->getStabilizationThreshold();
+			const PxReal contactReportThreshold = dynamic->getContactReportThreshold();
+			hash = FnvAccumulate(hash, &positionIters, sizeof(positionIters));
+			hash = FnvAccumulate(hash, &velocityIters, sizeof(velocityIters));
+			hash = FnvAccumulate(hash, &sleepThreshold, sizeof(sleepThreshold));
+			hash = FnvAccumulate(hash, &stabilizationThreshold, sizeof(stabilizationThreshold));
+			hash = FnvAccumulate(hash, &contactReportThreshold, sizeof(contactReportThreshold));
+		}
+
+		return hash;
+	}
+
+	PxU64 HashEntryConstruction(const PxwWorldEntry& entry)
+	{
+		PxU64 hash = kFnvOffsetBasis;
+		hash = FnvAccumulate(hash, &entry.stableId, sizeof(entry.stableId));
+		hash = FnvAccumulate(hash, &entry.kind, sizeof(entry.kind));
+
+		if (entry.kind == PxwHandleKind::eARTICULATION)
+		{
+			PxArticulationReducedCoordinate* articulation = AsArticulation(entry);
+			if (articulation == NULL)
+			{
+				return hash;
+			}
+
+			const PxU32 linkCount = articulation->getNbLinks();
+			hash = FnvAccumulate(hash, &linkCount, sizeof(linkCount));
+			for (PxU32 i = 0; i < linkCount; ++i)
+			{
+				PxArticulationLink* link = NULL;
+				if (articulation->getLinks(&link, 1, i) != 1 || link == NULL)
+				{
+					continue;
+				}
+				hash = HashRigidActorConstruction(hash, *link);
+			}
+
+			PxU32 positionIters = 0;
+			PxU32 velocityIters = 0;
+			articulation->getSolverIterationCounts(positionIters, velocityIters);
+			hash = FnvAccumulate(hash, &positionIters, sizeof(positionIters));
+			hash = FnvAccumulate(hash, &velocityIters, sizeof(velocityIters));
+			return hash;
+		}
+
+		PxRigidActor* actor = AsRigidActor(entry);
+		if (actor != NULL)
+		{
+			hash = HashRigidActorConstruction(hash, *actor);
+		}
+		return hash;
+	}
+}
+
+PxU64 PxwWorldHashConstruction(PxwWorld* world)
+{
+	if (world == NULL)
+	{
+		return 0;
+	}
+
+	PxU64 hash = kFnvOffsetBasis;
+	for (size_t i = 0; i < world->entries.size(); ++i)
+	{
+		const PxwWorldEntry& entry = world->entries[i];
+		if (entry.handle == NULL)
+		{
+			continue;
+		}
+		const PxU64 entryHash = HashEntryConstruction(entry);
+		hash = FnvAccumulate(hash, &entryHash, sizeof(entryHash));
+	}
+
+	return hash;
+}
+
+PxU32 PxwWorldHashConstructionPerEntry(PxwWorld* world, PxwEntryHash* dst, PxU32 capacity)
+{
+	if (world == NULL || dst == NULL)
+	{
+		return 0;
+	}
+
+	PxU32 count = 0;
+	for (size_t i = 0; i < world->entries.size() && count < capacity; ++i)
+	{
+		const PxwWorldEntry& entry = world->entries[i];
+		if (entry.handle == NULL)
+		{
+			continue;
+		}
+
+		dst[count].stableId = entry.stableId;
+		dst[count].kind = entry.kind;
+		dst[count].hash = HashEntryConstruction(entry);
+		++count;
+	}
+
+	return count;
 }
 
 PxU32 PxwWorldReadArticulationLinkPoses(PxwWorld* world, PxU32 stableId, PxwTransformData* dst, PxU32 capacity)

@@ -442,8 +442,28 @@ if(BUILD_TESTS)
     pxw_copy_physx_dlls(PxwRollbackRepro)
     pxw_depends_on_physx(PxwRollbackRepro)
 
+    # Isolates the spiked-ball desync: offset-attached shapes plus a
+    # PhysX-computed compound mass frame. Links only PhysX, so a failure here
+    # cannot be blamed on anything in the wrapper.
+    add_executable(PxwOffsetShapeRepro tests/PxwOffsetShapeRepro.cpp)
+    target_include_directories(PxwOffsetShapeRepro PRIVATE ${PHYSX_ROOT}/include)
+    if(MSVC)
+        target_compile_options(PxwOffsetShapeRepro PRIVATE /W4 /WX- /fp:precise)
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_libraries(PxwOffsetShapeRepro PRIVATE
+            -Wl,--start-group ${PHYSX_CORE_LIBS} -Wl,--end-group)
+        set_target_properties(PxwOffsetShapeRepro PROPERTIES BUILD_RPATH "$ORIGIN")
+    else()
+        target_link_libraries(PxwOffsetShapeRepro PRIVATE ${PHYSX_CORE_LIBS})
+    endif()
+
+    pxw_copy_physx_dlls(PxwOffsetShapeRepro)
+    pxw_depends_on_physx(PxwOffsetShapeRepro)
+
     enable_testing()
     add_test(NAME PxwUndpwrTests COMMAND PxwUndpwrTests)
     add_test(NAME PxwPoseRoundTripTests COMMAND PxwPoseRoundTripTests)
     add_test(NAME PxwRollbackRepro COMMAND PxwRollbackRepro)
+    add_test(NAME PxwOffsetShapeRepro COMMAND PxwOffsetShapeRepro)
 endif()

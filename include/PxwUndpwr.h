@@ -291,7 +291,8 @@ namespace pxw
         PxU32 shapeCount;
 
         /// Set when the tensor was within the isotropy tolerance and the mass frame was
-        /// collapsed to the identity. See PxwComputeMassProperties.
+        /// collapsed to the identity. In that case a near-origin centre of mass is also
+        /// snapped to the actor origin. See PxwComputeMassProperties.
         PxU32 massFrameCollapsed;
     };
 
@@ -420,13 +421,15 @@ extern "C"
     // ------------------------------------------------------------------ mass ----
 
     /// Default relative spread below which the principal axes are considered
-    /// meaningless and the mass frame is collapsed to the identity. 1% of the largest
-    /// principal moment.
-    #define PXW_DEFAULT_ISOTROPY_TOLERANCE 0.01f
+    /// meaningless and the mass frame is collapsed to the identity. 5% of the largest
+    /// principal moment: wide enough to catch the near-spherical compounds that are
+    /// actually fragile (a spiked ball sits near 1.3%) while leaving genuinely
+    /// elongated bodies, whose axes are well defined, untouched.
+    #define PXW_DEFAULT_ISOTROPY_TOLERANCE 0.05f
 
     /// Computes mass properties for an actor without applying them.
     ///
-    /// Differs from PxRigidBodyExt::updateMassAndInertia in three ways that matter for
+    /// Differs from PxRigidBodyExt::updateMassAndInertia in four ways that matter for
     /// networked determinism:
     ///
     ///  - shapes are accumulated strictly in attachment index order, so the result does
@@ -435,6 +438,10 @@ extern "C"
     ///    collapsed to the identity instead of storing an arbitrary eigenvector
     ///    rotation, which removes the ill-conditioning described on PxwMassProperties
     ///    and also removes the rotated mass frame that makes actor poses lossy;
+    ///  - in that same collapsed case, a centre of mass within 0.1% of the body's radius
+    ///    of gyration is snapped to the actor origin, since a near-sphere's summed COM
+    ///    is otherwise a last-bit-different quantity that still desyncs peers even after
+    ///    the frame is collapsed;
     ///  - otherwise the mass frame quaternion is put in a canonical sign, since a
     ///    diagonalisation is free to return either q or -q.
     ///
@@ -561,6 +568,37 @@ extern "C"
     /// precondition for their simulations agreeing at all. Unequal hashes mean the
     /// registration order differs and no amount of state synchronisation will help.
     PHYSX_WRAPPER_API PxU64 PxwWorldHashInternalIds(pxw::PxwWorld* world);
+
+    /// Hash of how every registered body was BUILT, as opposed to what state it is in.
+    ///
+    /// Covers shape count and attachment order, each shape's geometry, local pose,
+    /// contact and rest offsets, flags, filter data and material coefficients, and each
+    /// body's mass properties, damping, velocity and depenetration clamps, solver
+    /// iteration counts and thresholds. None of this appears in a snapshot, in
+    /// PxwWorldHashState or in PxwWorldHashPerEntry, because none of it changes as the
+    /// simulation runs -- and every one of them is read by every solve.
+    ///
+    /// Peers exchange this once after the world is built and again after a rebuild. Equal
+    /// hashes mean the bodies really are the same bodies; unequal hashes mean two peers
+    /// constructed the same entity differently and will diverge as soon as one of them is
+    /// loaded hard enough for the difference to show, which for a lightly touched body can
+    /// be hundreds of ticks later and look like anything but a construction bug.
+    ///
+    /// This matters most for compounds built from offset shapes. Twenty-five shapes are
+    /// twenty-five geometries, local poses and material bindings that must match exactly,
+    /// and a near-isotropic compound's mass is canonicalised precisely so that it does
+    /// NOT reflect small shape differences -- so the mass hash cannot be relied on to
+    /// catch them. A single ULP in one shape's local pose is enough to desync the body
+    /// once it is squeezed between two others, while leaving it in perfect agreement for
+    /// as long as it is only rolling on the floor.
+    ///
+    /// Addresses are never hashed: meshes are identified by vertex and element counts, so
+    /// the value is comparable between processes and machines.
+    PHYSX_WRAPPER_API PxU64 PxwWorldHashConstruction(pxw::PxwWorld* world);
+
+    /// Per-entry construction hashes, for naming which body was built differently.
+    /// Same contract as PxwWorldHashConstruction, one record per registered entry.
+    PHYSX_WRAPPER_API PxU32 PxwWorldHashConstructionPerEntry(pxw::PxwWorld* world, pxw::PxwEntryHash* dst, PxU32 capacity);
 
     /// Link poses for one registered articulation, in PhysX link-index order.
     PHYSX_WRAPPER_API PxU32 PxwWorldReadArticulationLinkPoses(pxw::PxwWorld* world, PxU32 stableId, pxw::PxwTransformData* dst, PxU32 capacity);
