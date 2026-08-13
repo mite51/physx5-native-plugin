@@ -421,11 +421,12 @@ extern "C"
     // ------------------------------------------------------------------ mass ----
 
     /// Default relative spread below which the principal axes are considered
-    /// meaningless and the mass frame is collapsed to the identity. 5% of the largest
-    /// principal moment: wide enough to catch the near-spherical compounds that are
-    /// actually fragile (a spiked ball sits near 1.3%) while leaving genuinely
-    /// elongated bodies, whose axes are well defined, untouched.
-    #define PXW_DEFAULT_ISOTROPY_TOLERANCE 0.05f
+    /// meaningless and the mass frame is collapsed to the identity. 1% of the largest
+    /// principal moment: deliberately narrow, so it collapses only bodies whose moments
+    /// are almost exactly equal and leaves genuinely elongated bodies untouched. A
+    /// near-spherical compound that sits just above this (a spiked ball is near 1.3%)
+    /// should pass a wider tolerance explicitly rather than have this default widened.
+    #define PXW_DEFAULT_ISOTROPY_TOLERANCE 0.01f
 
     /// Computes mass properties for an actor without applying them.
     ///
