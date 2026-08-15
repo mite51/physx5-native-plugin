@@ -480,6 +480,15 @@ extern "C"
 
     PHYSX_WRAPPER_API PxScene* PxwWorldGetScene(pxw::PxwWorld* world);
 
+    /// Reports whether the world's scene is actually running GPU rigid-body dynamics.
+    ///
+    /// A scene created with useGpu still falls back to CPU when no CUDA context is
+    /// available (a CPU-only plugin build, or a machine with no usable GPU), and that
+    /// fallback is otherwise silent. This reads the live PxScene flags so a caller can
+    /// tell what it got rather than what it asked for. Returns 1 when GPU dynamics is
+    /// enabled, 0 when it is not (including a null world).
+    PHYSX_WRAPPER_API PxU32 PxwWorldIsGpuDynamicsEnabled(pxw::PxwWorld* world);
+
     /// Registers a handle under a stable ID. The actor is not added to the scene
     /// until PxwWorldCommitPending runs, which adds everything in stable-ID order.
     PHYSX_WRAPPER_API PxI32 PxwWorldRegister(pxw::PxwWorld* world, PxU32 stableId, void* handle, PxU32 kind);

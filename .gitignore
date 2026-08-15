@@ -395,3 +395,5 @@ FodyWeavers.xsd
 
 # CMake generated files
 build/
+# Any variant build tree (build-gpu/, build-cpu/, etc.)
+build*/

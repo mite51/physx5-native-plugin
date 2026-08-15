@@ -1825,6 +1825,15 @@ PxScene* PxwWorldGetScene(PxwWorld* world)
 	return world != NULL ? world->scene : NULL;
 }
 
+PxU32 PxwWorldIsGpuDynamicsEnabled(PxwWorld* world)
+{
+	if (world == NULL || world->scene == NULL)
+	{
+		return 0u;
+	}
+	return (world->scene->getFlags() & PxSceneFlag::eENABLE_GPU_DYNAMICS) ? 1u : 0u;
+}
+
 PxI32 PxwWorldRegister(PxwWorld* world, PxU32 stableId, void* handle, PxU32 kind)
 {
 	if (world == NULL || handle == NULL)
