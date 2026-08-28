@@ -31,12 +31,37 @@
 #include "PxScene.h"
 #include "vehicle2/PxVehicleAPI.h"
 #include "VehicleBase.h"
+#include "../VehicleInterop.h"
 
 namespace pxw
 {
 
 using namespace physx;
 using namespace physx::vehicle2;
+
+// A wheel's collision shape configuration, resolved for actor creation: the blittable
+// descriptor the Unity side sends plus the geometry pointer, which cannot travel inside the
+// descriptor because it is an opaque native handle.
+struct WheelShapeConfig
+{
+	PxwVehicleWheelShapeDesc desc;
+	const PxGeometry* geometry;
+
+	// The historical behaviour: a cooked prism that neither simulates nor answers queries.
+	PX_FORCE_INLINE void setToDefault()
+	{
+		desc.geometryMode = PxwVehicleWheelGeometryMode::eCOOKED_PRISM;
+		desc.simulationShape = 0;
+		desc.sceneQueryShape = 0;
+		desc.margin = 0.0f;
+		for (PxU32 i = 0; i < 4; ++i)
+		{
+			desc.simFilterData[i] = 0;
+			desc.queryFilterData[i] = 0;
+		}
+		geometry = NULL;
+	}
+};
 
 struct PhysXIntegrationParams
 {
@@ -90,10 +115,20 @@ struct PhysXIntegrationState
 	// chassisGeometry is optional: when non-null it is used as the chassis
 	// collision shape (allowing Unity to supply any PxGeometry). When null a
 	// PxBoxGeometry built from physxParams.physxActorBoxShapeHalfExtents is used.
+	//
+	// wheelShapeConfigs is optional too, indexed by wheel id. When null every wheel gets
+	// WheelShapeConfig's default, which is the shape PxVehiclePhysXActorCreate would have built.
+	//
+	// physxParams is mutable because choosing a wheel's geometry can imply a fixed rotation for
+	// its shape - a convex core cylinder runs along its own local +X and has to be turned onto
+	// the wheel's axis - and physxWheelShapeLocalPoses is where such a rotation has to live: the
+	// vehicle overwrites each wheel shape's own local pose every step from the suspension and
+	// spin state, and composes it with the pose held here.
 	void create
-		(const BaseVehicleParams& baseParams, const PhysXIntegrationParams& physxParams,
+		(const BaseVehicleParams& baseParams, PhysXIntegrationParams& physxParams,
 		 PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial,
-		 const PxGeometry* chassisGeometry = NULL);
+		 const PxGeometry* chassisGeometry = NULL,
+		 const WheelShapeConfig* wheelShapeConfigs = NULL);
 
 	void destroy();
 
@@ -119,7 +154,8 @@ class PhysXActorVehicle
 	, public PxVehiclePhysXRoadGeometrySceneQueryComponent
 {
 public:
-	bool initialize(PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial, const PxGeometry* chassisGeometry = NULL);
+	bool initialize(PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial,
+		const PxGeometry* chassisGeometry = NULL, const WheelShapeConfig* wheelShapeConfigs = NULL);
 	virtual void destroy();
 
 	void setUpActor(PxScene& scene, const PxTransform& pose, const char* vehicleName);

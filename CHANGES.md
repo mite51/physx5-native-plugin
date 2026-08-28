@@ -2,6 +2,125 @@
 
 This document describes changes made to the native plugin: first the PhysX 5.6.1 upgrade, then the robot-removal / vehicle-support refactor.
 
+## Convex core geometry, collision filtering and configurable vehicle wheel shapes
+
+### Convex core geometry
+
+`CreateConvexCoreGeometry` exposes PhysX 5.6's `PxConvexCoreGeometry`: a pre-authored GJK support
+core swept by a margin, giving true cylinders, cones and ellipsoids without cooking a hull. It is
+a separate export rather than another case in `CreatePxGeometry` because it is parameterised by a
+core type and a margin, neither of which fits that function's `(type, params, ref)` shape.
+`eCONVEXCORE` in `CreatePxGeometry` now warns and points at the new export instead of falling
+through to the unsupported-type default. Cylinder, cone and segment cores run along local +X,
+matching the capsule convention, so orientation comes from the shape's local pose.
+
+`HashGeometryConstruction` handles `eCONVEXCORE` carefully. `PxConvexCoreGeometry` holds a fixed
+`PxU8[24]` core buffer but memcpys only `sizeof(Core)` bytes into it — eight, for a cylinder —
+leaving the rest at whatever the stack or allocator contained. Hashing the buffer wholesale would
+fold uninitialised memory into the construction hash and make two peers holding identical
+cylinders report a mismatch, so only the active core's bytes participate, alongside the core type
+and the margin. `PxwConvexCoreParamCount` in `DataInterop.h` is the single definition of how many
+that is, shared by the factory and the hash.
+
+### Collision filtering
+
+Per-shape filter data and PhysX's group collision table were previously unreachable from managed
+code, which made the group table both unusable and a silent determinism hole. Added
+`SetShapeSimulationFilterData`, `SetShapeQueryFilterData`, `GetShapeSimulationFilterData`,
+`SetGroupCollisionFlag`, `GetGroupCollisionFlag` and `ResetGroupCollisionFlags`.
+
+`PxwWorldHashConstruction` now folds the group table in. The table decides whether two shapes
+collide at all, so peers that disagree about it simulate differently while every actor, shape and
+geometry hashes identically; and because PhysXExtensions keeps it as process-global state, nothing
+else in the construction hash can stand in for it. Only the *disabled* pairs contribute, in a
+fixed order. That means a world which never touches groups hashes exactly as it did before this
+existed, and the contribution describes the table's meaning rather than its storage.
+`ResetGroupCollisionFlags` exists because the table outlives any one scene, so a session that
+changed it would otherwise leak that state into whatever runs next in the process.
+
+### Configurable vehicle wheel shapes
+
+Wheel shapes were cooked 16-sided convex prisms created with `PxShapeFlags(0)`, so they collided
+with nothing and were invisible to scene queries. `PxwVehicleWheelShapeDesc` and
+`SetVehicleWheelShapeParams` make the geometry, the shape flags and the filter data per-wheel
+choices, with `PxwVehicleWheelGeometryMode` selecting the cooked prism, a true cylinder, or a
+caller-supplied geometry.
+
+`PhysXIntegrationState::create` no longer calls `PxVehiclePhysXActorCreate`. It calls
+`PxVehiclePhysXActorConfigure` — the same call that helper makes — and then a plugin-owned
+`createShapes`, because `PxShape::setGeometry` cannot change a shape's geometry type, so per-wheel
+geometry has to be decided when the shape is created. `CookWheelPrism` reproduces the SDK's hull
+bit for bit in the default mode, down to the segment count, vertex ordering and cooking flags,
+which is what keeps every existing vehicle's construction hash unchanged.
+
+The cylinder mode needs its local +X turned onto the wheel's rotation axis. That rotation is
+written into `PhysXIntegrationParams::physxWheelShapeLocalPoses` rather than the shape's own local
+pose, because the vehicle overwrites the latter every step from the suspension and spin state and
+composes it with the former. `create` therefore takes its params by non-const reference.
+
+Because that rotation is construction rather than runtime output, the construction hash has to see
+it: a convex-core cylinder is frame-independent geometry, so two peers whose vehicle frames disagree
+build the same wheel geometry, would hash equal on it alone, and still point their wheels different
+ways. `PxwWorldHashConstruction` now folds in each vehicle's `physxWheelShapeLocalPoses` in axle
+order, but only for wheels whose pose is not identity, keyed by wheel id. This is deliberately
+sparse: on the shipped Unity frame the wheel axis already is the cylinder's local +X, so the
+axis-alignment rotation is identity and contributes nothing — a default cooked-prism vehicle and a
+default-frame cylinder vehicle both leave every pose at identity, so their construction hashes are
+bit-identical to before this existed. Only a frame that turns the cylinder axis off the wheel axis
+bakes a non-identity pose, and that is exactly the divergence the fold now catches. The runtime
+PxShape wheel poses stay excluded, exactly as before. The diagnostic
+`PxwWorldHashConstructionPartPerEntry` is now vehicle-aware to match — parts 0/5/7 skip the runtime
+wheel poses and a new part 12 isolates the construction poses.
+
+Enabling `simulationShape` is not safe on its own, and the descriptor says so at length: the
+suspension raycast and tire model already resolve the wheel against the road, so a simulating
+wheel needs a collision group that excludes the drivable surface or the road is resolved twice and
+the vehicle rides high while contact friction fights the tire model.
+
+`PxwVehicleChassisDesc::boxLocalPose` is renamed `shapeLocalPose`. It has applied to a
+caller-supplied chassis geometry as much as to the fallback box ever since custom chassis geometry
+was added; only the name still said box.
+
+### Tests
+
+`TestConstructionHashDescribesConvexCores` covers the core type, each dimension, the margin, and —
+the point of the exercise — that garbage in the core bytes a cylinder does not use is ignored.
+`TestConstructionHashIncludesCollisionGroupTable` covers a disabled pair, the pair's symmetry, and
+that resetting the table restores the hash a world with no filtering had.
+`TestVehicleDefaultWheelShapesAreUnchanged` is the regression guard for the createShapes rewrite:
+a vehicle left alone hashes identically to one that explicitly asks for the defaults, its wheels
+are still non-colliding cooked hulls, and each override does reach the shapes.
+`TestVehicleCylinderWheelsAreDeterministic` drives two vehicles on simulating, filtered cylinder
+wheels for 200 rollback ticks and requires them to stay bit-identical, since convex core
+narrowphase is a different code path from the cooked hull it replaces.
+`TestVehicleConstructionHashIncludesWheelShapeLocalPoses` pins the new hashing contract: on the
+shipped frame a cylinder vehicle's wheel poses are identity, so part 12 and the aggregate match the
+cooked-prism default (the backward-compatibility guarantee); a cylinder vehicle built on a frame
+that rotates the axis off the wheel axis carries a non-identity pose, so part 12 and the aggregate
+move to separate it; two identical cylinder builds agree; and the runtime wheel poses that move
+every step change neither the aggregate nor part 12 as the vehicle drives.
+
+`TestConvexCoreOnMeshIsReproducibleUnderRollback` is the soak that had to pass before wheels were
+allowed to depend on convex core geometry: cylinders resting and rolling on an uneven triangle
+mesh, since mesh contact is resolved per triangle and a rolling cylinder re-derives its contact
+set constantly, and a cylinder's contact patch is a line rather than a point or a facet.
+
+It checks the two things that matter. Two peers running the same rollback pattern agree for the
+full 600 ticks. And a run that rewinds every eight ticks and resimulates the window lands on the
+same state as a run that never rewound, bit for bit, for cylinders and for boxes alike — asserted
+under PGS and characterised under TGS, as elsewhere in the suite. Both hold as measured: TGS
+reports bit-exact replay for the cylinder and the box as well, it is simply not asserted there.
+
+Both sides of that second comparison restore before every step, which is not a detail of the test
+but the reason the property holds: a step following a restore narrowphases cold, a step following
+another step warm-starts from persistent contact manifolds the snapshot cannot carry, and the two
+do not agree. Restoring unconditionally makes every step cold and removes the asymmetry. This is
+the discipline `RollbackEngine` already follows, so an uninterrupted warm run is not a
+configuration that occurs at runtime, and comparing against one measures the contact cache rather
+than the geometry. An earlier draft of this test did exactly that and reported cylinders parting
+company with a warm run after ~20 ticks; that number described PhysX's warm start, not convex
+core geometry, and the comparison has been replaced with the cold-versus-cold one above.
+
 ## Restoring a world that holds a parked pool slot no longer crashes
 
 Any session that used an entity pool crashed the process on its first rollback. An entity pool

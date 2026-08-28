@@ -1,10 +1,36 @@
 #pragma once
 #include "PxPhysicsAPI.h"
+// Not reachable through PxPhysicsAPI.h.
+#include "geometry/PxConvexCoreGeometry.h"
 
 using namespace physx;
 
 namespace pxw
 {
+	// Collision groups addressable through PxDefaultSimulationFilterShader's group table.
+	// Fixed by PhysXExtensions (GROUP_SIZE in ExtDefaultSimulationFilterShader.cpp), which
+	// asserts on indices at or above this, so callers are clamped rather than passed through.
+	const PxU32 kPxwNbCollisionGroups = 32;
+
+	// Number of floats that describe each convex core, and so also the number of bytes
+	// (times sizeof(float)) that PxConvexCoreGeometry actually initialises in its core
+	// storage. The geometry keeps a fixed PxU8[MAX_CORE_SIZE] buffer but only memcpys
+	// sizeof(Core) bytes into it, leaving the tail uninitialised, so anything that reads
+	// the core as bytes - construction hashing above all - must stop at this count or it
+	// will fold in padding that differs between two processes holding identical shapes.
+	PX_INLINE int PxwConvexCoreParamCount(const PxConvexCore::Type coreType)
+	{
+		switch (coreType)
+		{
+		case PxConvexCore::ePOINT:     return 0;
+		case PxConvexCore::eSEGMENT:   return 1;  // length
+		case PxConvexCore::eBOX:       return 3;  // extents
+		case PxConvexCore::eELLIPSOID: return 3;  // radii
+		case PxConvexCore::eCYLINDER:  return 2;  // height, radius
+		case PxConvexCore::eCONE:      return 2;  // height, radius
+		default:                       return -1;
+		}
+	}
 	struct PxwTransformData
 	{
 		PxVec3 position;

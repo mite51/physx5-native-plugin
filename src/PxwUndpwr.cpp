@@ -763,6 +763,10 @@ namespace pxw
 				PxwVehicle* vehicle = AsVehicle(entry);
 				if (vehicle != NULL)
 				{
+					// A rollback rebuild replaces the owning PxScene while retaining the
+					// vehicle handle. Point the vehicle at the replacement before adding
+					// its chassis and registering it for Vehicle2 stepping.
+					vehicle->SetScene(scene);
 					vehicle->AddToScene();
 					// Putting the chassis actor in the scene is not enough: a vehicle is
 					// only advanced by VehicleStepScene, which iterates the per-scene step
@@ -1805,9 +1809,20 @@ void PxwWorldDestroy(PxwWorld* world)
 		PxwWorldFetchResults(world);
 	}
 
+	// Detach every retained native handle explicitly. In particular, PxwVehicle
+	// tracks its own in-scene flag and scene pointer; releasing the PxScene alone
+	// leaves that bookkeeping stale and the next rebuilt world would step a chassis
+	// that was never inserted into its replacement scene.
 	for (size_t i = 0; i < world->entries.size(); ++i)
 	{
-		ReleaseArticulationCache(world->entries[i]);
+		if (world->scene != NULL)
+		{
+			RemoveEntryFromScene(world->scene, world->entries[i]);
+		}
+		else
+		{
+			ReleaseArticulationCache(world->entries[i]);
+		}
 	}
 	world->entries.clear();
 
@@ -2631,6 +2646,36 @@ PxU64 PxwWorldHashInternalIds(PxwWorld* world)
 
 namespace
 {
+	// Folds the PxDefaultSimulationFilterShader group table into the construction hash.
+	//
+	// The table decides whether two shapes collide at all, so two peers that disagree about it
+	// simulate differently while every actor, shape and geometry hashes identically. It is not
+	// scene state either: PhysXExtensions keeps it as process-global state, so nothing else in
+	// the construction hash can stand in for it.
+	//
+	// Only the disabled pairs contribute, in a fixed order, for two reasons. A world that never
+	// touches groups hashes exactly as it did before this existed, so adding filtering does not
+	// invalidate every recorded hash; and the contribution describes the table's meaning rather
+	// than its storage, so it cannot depend on how the table was reached.
+	PxU64 HashCollisionGroupTable(PxU64 hash)
+	{
+		for (PxU32 group0 = 0; group0 < kPxwNbCollisionGroups; ++group0)
+		{
+			// The table is symmetric in use, so only the upper triangle is inspected; a
+			// caller that set just one direction still shows up here.
+			for (PxU32 group1 = group0; group1 < kPxwNbCollisionGroups; ++group1)
+			{
+				if (PxGetGroupCollisionFlag(static_cast<PxU16>(group0), static_cast<PxU16>(group1)))
+				{
+					continue;
+				}
+				hash = FnvAccumulate(hash, &group0, sizeof(group0));
+				hash = FnvAccumulate(hash, &group1, sizeof(group1));
+			}
+		}
+		return hash;
+	}
+
 	PxU64 HashGeometryConstruction(PxU64 hash, const PxGeometry& geometry)
 	{
 		const PxU32 type = static_cast<PxU32>(geometry.getType());
@@ -2679,6 +2724,26 @@ namespace
 			hash = FnvAccumulate(hash, &triangles, sizeof(triangles));
 			break;
 		}
+		case PxGeometryType::eCONVEXCORE:
+		{
+			const PxConvexCoreGeometry& g = static_cast<const PxConvexCoreGeometry&>(geometry);
+			const PxConvexCore::Type coreType = g.getCoreType();
+			const PxU32 coreTypeBits = static_cast<PxU32>(coreType);
+			hash = FnvAccumulate(hash, &coreTypeBits, sizeof(coreTypeBits));
+
+			// Only the bytes this core actually initialises. The rest of the geometry's core
+			// buffer is uninitialised padding, so hashing all of it would make two peers
+			// holding identical cylinders report a construction mismatch.
+			const int paramCount = PxwConvexCoreParamCount(coreType);
+			if (paramCount > 0)
+			{
+				hash = FnvAccumulate(hash, g.getCoreData(), sizeof(PxReal) * static_cast<size_t>(paramCount));
+			}
+
+			const PxReal margin = g.getMargin();
+			hash = FnvAccumulate(hash, &margin, sizeof(margin));
+			break;
+		}
 		case PxGeometryType::eHEIGHTFIELD:
 		{
 			const PxHeightFieldGeometry& g = static_cast<const PxHeightFieldGeometry&>(geometry);
@@ -2698,14 +2763,18 @@ namespace
 		return hash;
 	}
 
-	PxU64 HashShapeConstruction(PxU64 hash, const PxShape& shape)
+	PxU64 HashShapeConstruction(
+		PxU64 hash, const PxShape& shape, bool includeLocalPose)
 	{
 		hash = HashGeometryConstruction(hash, shape.getGeometry());
 
-		// The offset local pose: the whole point of this exercise. A one-ULP difference
-		// here is invisible to every other checksum and desyncs a squeezed compound.
-		const PxTransform localPose = shape.getLocalPose();
-		hash = FnvAccumulate(hash, &localPose, sizeof(localPose));
+		if (includeLocalPose)
+		{
+			// Vehicle wheel-shape poses are runtime output updated after every Vehicle2
+			// step. Every other local pose is immutable construction and must participate.
+			const PxTransform localPose = shape.getLocalPose();
+			hash = FnvAccumulate(hash, &localPose, sizeof(localPose));
+		}
 
 		const PxReal contactOffset = shape.getContactOffset();
 		const PxReal restOffset = shape.getRestOffset();
@@ -2745,10 +2814,41 @@ namespace
 		return hash;
 	}
 
+	// Folds a vehicle's construction-time wheel-shape local poses into the hash. These carry
+	// the cylinder axis alignment (physxWheelShapeLocalPoses): a convex-core cylinder runs
+	// along its own local +X and has to be turned onto the wheel axis, and that rotation is
+	// composed with the runtime pose the vehicle rewrites every step. Unlike the runtime
+	// PxShape wheel poses (deliberately excluded, see HashShapeConstruction), this rotation is
+	// construction, so two peers with different frames must not hash equal on geometry alone.
+	//
+	// Sparse on purpose: only wheels whose pose is not identity contribute, keyed by wheel id
+	// in axle order. A default cooked-prism vehicle leaves every pose at identity and adds
+	// nothing, so its construction hash stays bit-identical to before this existed.
+	PxU64 HashVehicleWheelConstructionPoses(PxU64 hash, const PxwVehicle& vehicle)
+	{
+		PxU32 wheelIds[PxVehicleLimits::eMAX_NB_WHEELS];
+		PxTransform localPoses[PxVehicleLimits::eMAX_NB_WHEELS];
+		const PxU32 count = vehicle.GetWheelShapeConstructionPoses(
+			wheelIds, localPoses, PxVehicleLimits::eMAX_NB_WHEELS);
+		for (PxU32 i = 0; i < count; ++i)
+		{
+			const PxTransform& pose = localPoses[i];
+			const bool isIdentity =
+				pose.p.x == 0.0f && pose.p.y == 0.0f && pose.p.z == 0.0f &&
+				pose.q.x == 0.0f && pose.q.y == 0.0f && pose.q.z == 0.0f && pose.q.w == 1.0f;
+			if (isIdentity)
+				continue;
+			hash = FnvAccumulate(hash, &wheelIds[i], sizeof(wheelIds[i]));
+			hash = FnvAccumulate(hash, &pose, sizeof(pose));
+		}
+		return hash;
+	}
+
 	// Shapes are hashed in attachment order, which is itself part of the construction:
 	// PhysX generates contacts per shape in this order, so two peers that attached the
 	// same shapes differently are not built the same way even though the set matches.
-	PxU64 HashRigidActorConstruction(PxU64 hash, PxRigidActor& actor)
+	PxU64 HashRigidActorConstruction(
+		PxU64 hash, PxRigidActor& actor, const PxwVehicle* vehicle = NULL)
 	{
 		const PxU32 actorFlags = static_cast<PxU32>(actor.getActorFlags());
 		hash = FnvAccumulate(hash, &actorFlags, sizeof(actorFlags));
@@ -2762,7 +2862,8 @@ namespace
 			{
 				continue;
 			}
-			hash = HashShapeConstruction(hash, *shape);
+			hash = HashShapeConstruction(
+				hash, *shape, vehicle == NULL || !vehicle->IsWheelShape(shape));
 		}
 
 		PxRigidBody* body = actor.is<PxRigidBody>();
@@ -2814,6 +2915,182 @@ namespace
 		return hash;
 	}
 
+	PxU64 HashRigidActorConstructionPart(PxRigidActor& actor, PxU32 part, const PxwVehicle* vehicle = NULL)
+	{
+		PxU64 hash = kFnvOffsetBasis;
+
+		// Part 12 isolates the vehicle's construction-time wheel-shape local poses, using the
+		// same sparse rule as the aggregate hash. A non-vehicle actor contributes nothing here.
+		if (part == 12)
+		{
+			if (vehicle != NULL)
+				hash = HashVehicleWheelConstructionPoses(hash, *vehicle);
+			return hash;
+		}
+
+		if (part == 0)
+		{
+			const PxU32 actorFlags = static_cast<PxU32>(actor.getActorFlags());
+			hash = FnvAccumulate(hash, &actorFlags, sizeof(actorFlags));
+			const PxU32 shapeCount = actor.getNbShapes();
+			hash = FnvAccumulate(hash, &shapeCount, sizeof(shapeCount));
+			for (PxU32 i = 0; i < shapeCount; ++i)
+			{
+				PxShape* shape = NULL;
+				if (actor.getShapes(&shape, 1, i) == 1 && shape != NULL)
+				{
+					// Match the aggregate hash: a wheel shape's runtime local pose is excluded.
+					const bool includeLocalPose = vehicle == NULL || !vehicle->IsWheelShape(shape);
+					hash = HashShapeConstruction(hash, *shape, includeLocalPose);
+				}
+			}
+			return hash;
+		}
+
+		if (part >= 3 && part <= 11)
+		{
+			const PxU32 actorFlags = static_cast<PxU32>(actor.getActorFlags());
+			const PxU32 shapeCount = actor.getNbShapes();
+			if (part == 3)
+			{
+				hash = FnvAccumulate(hash, &actorFlags, sizeof(actorFlags));
+				hash = FnvAccumulate(hash, &shapeCount, sizeof(shapeCount));
+				return hash;
+			}
+
+			for (PxU32 i = 0; i < shapeCount; ++i)
+			{
+				PxShape* shape = NULL;
+				if (actor.getShapes(&shape, 1, i) != 1 || shape == NULL)
+					continue;
+				if (part == 4)
+				{
+					hash = HashGeometryConstruction(hash, shape->getGeometry());
+				}
+				else if (part == 5)
+				{
+					const PxTransform localPose = shape->getLocalPose();
+					const PxReal contactOffset = shape->getContactOffset();
+					const PxReal restOffset = shape->getRestOffset();
+					const PxU32 shapeFlags = static_cast<PxU32>(shape->getFlags());
+					const PxFilterData simulationFilter = shape->getSimulationFilterData();
+					const PxFilterData queryFilter = shape->getQueryFilterData();
+					// Runtime wheel poses are excluded here for the same reason as the aggregate
+					// hash; every other shape metadata field still participates.
+					if (vehicle == NULL || !vehicle->IsWheelShape(shape))
+						hash = FnvAccumulate(hash, &localPose, sizeof(localPose));
+					hash = FnvAccumulate(hash, &contactOffset, sizeof(contactOffset));
+					hash = FnvAccumulate(hash, &restOffset, sizeof(restOffset));
+					hash = FnvAccumulate(hash, &shapeFlags, sizeof(shapeFlags));
+					hash = FnvAccumulate(hash, &simulationFilter, sizeof(simulationFilter));
+					hash = FnvAccumulate(hash, &queryFilter, sizeof(queryFilter));
+				}
+				else if (part == 6)
+				{
+					const PxU32 materialCount = shape->getNbMaterials();
+					hash = FnvAccumulate(hash, &materialCount, sizeof(materialCount));
+					for (PxU32 j = 0; j < materialCount; ++j)
+					{
+						PxMaterial* material = NULL;
+						if (shape->getMaterials(&material, 1, j) != 1 || material == NULL)
+							continue;
+						const PxReal staticFriction = material->getStaticFriction();
+						const PxReal dynamicFriction = material->getDynamicFriction();
+						const PxReal restitution = material->getRestitution();
+						const PxU32 frictionCombine = static_cast<PxU32>(material->getFrictionCombineMode());
+						const PxU32 restitutionCombine = static_cast<PxU32>(material->getRestitutionCombineMode());
+						const PxU32 materialFlags = static_cast<PxU32>(material->getFlags());
+						hash = FnvAccumulate(hash, &staticFriction, sizeof(staticFriction));
+						hash = FnvAccumulate(hash, &dynamicFriction, sizeof(dynamicFriction));
+						hash = FnvAccumulate(hash, &restitution, sizeof(restitution));
+						hash = FnvAccumulate(hash, &frictionCombine, sizeof(frictionCombine));
+						hash = FnvAccumulate(hash, &restitutionCombine, sizeof(restitutionCombine));
+						hash = FnvAccumulate(hash, &materialFlags, sizeof(materialFlags));
+					}
+				}
+				else if (part == 7)
+				{
+					// Wheel shapes are skipped: their local pose is runtime output, not
+					// construction. Part 12 carries their construction-time axis pose instead.
+					if (vehicle == NULL || !vehicle->IsWheelShape(shape))
+					{
+						const PxTransform localPose = shape->getLocalPose();
+						hash = FnvAccumulate(hash, &localPose, sizeof(localPose));
+					}
+				}
+				else if (part == 8)
+				{
+					const PxReal contactOffset = shape->getContactOffset();
+					const PxReal restOffset = shape->getRestOffset();
+					hash = FnvAccumulate(hash, &contactOffset, sizeof(contactOffset));
+					hash = FnvAccumulate(hash, &restOffset, sizeof(restOffset));
+				}
+				else if (part == 9)
+				{
+					const PxU32 shapeFlags = static_cast<PxU32>(shape->getFlags());
+					hash = FnvAccumulate(hash, &shapeFlags, sizeof(shapeFlags));
+				}
+				else if (part == 10)
+				{
+					const PxFilterData simulationFilter = shape->getSimulationFilterData();
+					hash = FnvAccumulate(hash, &simulationFilter, sizeof(simulationFilter));
+				}
+				else
+				{
+					const PxFilterData queryFilter = shape->getQueryFilterData();
+					hash = FnvAccumulate(hash, &queryFilter, sizeof(queryFilter));
+				}
+			}
+			return hash;
+		}
+
+		PxRigidBody* body = actor.is<PxRigidBody>();
+		if (body == NULL)
+			return hash;
+
+		if (part == 1)
+		{
+			const PxReal mass = body->getMass();
+			const PxVec3 inertia = body->getMassSpaceInertiaTensor();
+			const PxTransform cMass = body->getCMassLocalPose();
+			const PxU32 bodyFlags = static_cast<PxU32>(body->getRigidBodyFlags());
+			const PxReal linearDamping = body->getLinearDamping();
+			const PxReal angularDamping = body->getAngularDamping();
+			const PxReal maxLinearVelocity = body->getMaxLinearVelocity();
+			const PxReal maxAngularVelocity = body->getMaxAngularVelocity();
+			const PxReal maxDepenetration = body->getMaxDepenetrationVelocity();
+			const PxReal maxContactImpulse = body->getMaxContactImpulse();
+			hash = FnvAccumulate(hash, &mass, sizeof(mass));
+			hash = FnvAccumulate(hash, &inertia, sizeof(inertia));
+			hash = FnvAccumulate(hash, &cMass, sizeof(cMass));
+			hash = FnvAccumulate(hash, &bodyFlags, sizeof(bodyFlags));
+			hash = FnvAccumulate(hash, &linearDamping, sizeof(linearDamping));
+			hash = FnvAccumulate(hash, &angularDamping, sizeof(angularDamping));
+			hash = FnvAccumulate(hash, &maxLinearVelocity, sizeof(maxLinearVelocity));
+			hash = FnvAccumulate(hash, &maxAngularVelocity, sizeof(maxAngularVelocity));
+			hash = FnvAccumulate(hash, &maxDepenetration, sizeof(maxDepenetration));
+			hash = FnvAccumulate(hash, &maxContactImpulse, sizeof(maxContactImpulse));
+			return hash;
+		}
+
+		PxRigidDynamic* dynamic = actor.is<PxRigidDynamic>();
+		if (dynamic != NULL && part == 2)
+		{
+			PxU32 positionIters = 0;
+			PxU32 velocityIters = 0;
+			dynamic->getSolverIterationCounts(positionIters, velocityIters);
+			const PxReal sleepThreshold = dynamic->getSleepThreshold();
+			const PxReal stabilizationThreshold = dynamic->getStabilizationThreshold();
+			const PxReal contactReportThreshold = dynamic->getContactReportThreshold();
+			hash = FnvAccumulate(hash, &positionIters, sizeof(positionIters));
+			hash = FnvAccumulate(hash, &velocityIters, sizeof(velocityIters));
+			hash = FnvAccumulate(hash, &sleepThreshold, sizeof(sleepThreshold));
+			hash = FnvAccumulate(hash, &stabilizationThreshold, sizeof(stabilizationThreshold));
+			hash = FnvAccumulate(hash, &contactReportThreshold, sizeof(contactReportThreshold));
+		}
+		return hash;
+	}
+
 	PxU64 HashEntryConstruction(const PxwWorldEntry& entry)
 	{
 		PxU64 hash = kFnvOffsetBasis;
@@ -2851,7 +3128,49 @@ namespace
 		PxRigidActor* actor = AsRigidActor(entry);
 		if (actor != NULL)
 		{
-			hash = HashRigidActorConstruction(hash, *actor);
+			PxwVehicle* vehicle = entry.kind == PxwHandleKind::eVEHICLE ? AsVehicle(entry) : NULL;
+			hash = HashRigidActorConstruction(hash, *actor, vehicle);
+			if (vehicle != NULL)
+			{
+				// Construction-time cylinder axis alignment, excluded from the per-shape hash
+				// because the wheel PxShape pose it lives behind is runtime output.
+				hash = HashVehicleWheelConstructionPoses(hash, *vehicle);
+			}
+		}
+		return hash;
+	}
+
+	PxU64 HashEntryConstructionPart(const PxwWorldEntry& entry, PxU32 part)
+	{
+		PxU64 hash = kFnvOffsetBasis;
+		hash = FnvAccumulate(hash, &entry.stableId, sizeof(entry.stableId));
+		hash = FnvAccumulate(hash, &entry.kind, sizeof(entry.kind));
+
+		if (entry.kind == PxwHandleKind::eARTICULATION)
+		{
+			PxArticulationReducedCoordinate* articulation = AsArticulation(entry);
+			if (articulation == NULL)
+				return hash;
+			const PxU32 linkCount = articulation->getNbLinks();
+			hash = FnvAccumulate(hash, &linkCount, sizeof(linkCount));
+			for (PxU32 i = 0; i < linkCount; ++i)
+			{
+				PxArticulationLink* link = NULL;
+				if (articulation->getLinks(&link, 1, i) == 1 && link != NULL)
+				{
+					const PxU64 linkHash = HashRigidActorConstructionPart(*link, part);
+					hash = FnvAccumulate(hash, &linkHash, sizeof(linkHash));
+				}
+			}
+			return hash;
+		}
+
+		PxRigidActor* actor = AsRigidActor(entry);
+		if (actor != NULL)
+		{
+			PxwVehicle* vehicle = entry.kind == PxwHandleKind::eVEHICLE ? AsVehicle(entry) : NULL;
+			const PxU64 actorHash = HashRigidActorConstructionPart(*actor, part, vehicle);
+			hash = FnvAccumulate(hash, &actorHash, sizeof(actorHash));
 		}
 		return hash;
 	}
@@ -2875,6 +3194,8 @@ PxU64 PxwWorldHashConstruction(PxwWorld* world)
 		const PxU64 entryHash = HashEntryConstruction(entry);
 		hash = FnvAccumulate(hash, &entryHash, sizeof(entryHash));
 	}
+
+	hash = HashCollisionGroupTable(hash);
 
 	return hash;
 }
@@ -2901,6 +3222,26 @@ PxU32 PxwWorldHashConstructionPerEntry(PxwWorld* world, PxwEntryHash* dst, PxU32
 		++count;
 	}
 
+	return count;
+}
+
+PxU32 PxwWorldHashConstructionPartPerEntry(
+	PxwWorld* world, PxwEntryHash* dst, PxU32 capacity, PxU32 part)
+{
+	if (world == NULL || dst == NULL)
+		return 0;
+
+	PxU32 count = 0;
+	for (size_t i = 0; i < world->entries.size() && count < capacity; ++i)
+	{
+		const PxwWorldEntry& entry = world->entries[i];
+		if (entry.handle == NULL)
+			continue;
+		dst[count].stableId = entry.stableId;
+		dst[count].kind = entry.kind;
+		dst[count].hash = HashEntryConstructionPart(entry, part);
+		++count;
+	}
 	return count;
 }
 

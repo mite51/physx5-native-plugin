@@ -267,8 +267,61 @@ namespace pxw
 			return new PxConvexMeshGeometry(static_cast<PxConvexMesh*>(shapeRef), scale);
 		case PxGeometryType::ePLANE:
 			return new PxPlaneGeometry();
+		case PxGeometryType::eCONVEXCORE:
+			PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__, "Convex core geometry needs a core type and a margin; use CreateConvexCoreGeometry\n");
+			break;
 		default:
 			PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__, "Geometry type not supported\n");
+			break;
+		}
+		return NULL;
+	}
+
+	/**
+	* \brief Creates a convex core geometry: a pre-authored GJK support core swept by a margin.
+	*
+	* The core axis is local +X for the cylinder, cone and segment cores, matching the
+	* convention PxCapsuleGeometry uses. Orientation therefore comes from the shape's local
+	* pose, not from the geometry.
+	*/
+	PxGeometry* PhysXWrapper::CreateConvexCoreGeometry(const PxConvexCore::Type coreType, const int numCoreParams, const float* coreParams, const float margin)
+	{
+		PxGetFoundation().error(PxErrorCode::eDEBUG_INFO, __FILE__, __LINE__, "Create convex core geometry\n");
+
+		if (margin < 0.0f)
+		{
+			PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__, "Convex core margin must not be negative\n");
+			return NULL;
+		}
+		if (numCoreParams > 0 && coreParams == NULL)
+		{
+			PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__, "Convex core params missing\n");
+			return NULL;
+		}
+		if (numCoreParams != PxwConvexCoreParamCount(coreType))
+		{
+			PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__, "Incorrect parameter number\n");
+			return NULL;
+		}
+
+		switch (coreType)
+		{
+		case PxConvexCore::ePOINT:
+			// A point core swept by a margin is a sphere; PxSphereGeometry is faster, but the
+			// core is accepted so callers can drive every core through one entry point.
+			return new PxConvexCoreGeometry(PxConvexCore::Point(), margin);
+		case PxConvexCore::eSEGMENT:
+			return new PxConvexCoreGeometry(PxConvexCore::Segment(coreParams[0]), margin);
+		case PxConvexCore::eBOX:
+			return new PxConvexCoreGeometry(PxConvexCore::Box(coreParams[0], coreParams[1], coreParams[2]), margin);
+		case PxConvexCore::eELLIPSOID:
+			return new PxConvexCoreGeometry(PxConvexCore::Ellipsoid(coreParams[0], coreParams[1], coreParams[2]), margin);
+		case PxConvexCore::eCYLINDER:
+			return new PxConvexCoreGeometry(PxConvexCore::Cylinder(coreParams[0], coreParams[1]), margin);
+		case PxConvexCore::eCONE:
+			return new PxConvexCoreGeometry(PxConvexCore::Cone(coreParams[0], coreParams[1]), margin);
+		default:
+			PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__, "Convex core type not supported\n");
 			break;
 		}
 		return NULL;

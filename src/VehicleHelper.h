@@ -31,6 +31,8 @@ namespace pxw
 		void SetFrame(const PxwVehicleFrameDesc& frame);
 		void SetAxleDescription(int nbAxles, const int* nbWheelsPerAxle, const int* wheelIdsInAxleOrder);
 		void SetWheel(int wheelId, const PxwVehicleWheelDesc& d);
+		// geometry is only read when d.geometryMode is eGEOMETRY, and must outlive the vehicle.
+		void SetWheelShape(int wheelId, const PxwVehicleWheelShapeDesc& d, const PxGeometry* geometry);
 		void SetSuspension(int wheelId, const PxwVehicleSuspensionDesc& d);
 		void SetSuspensionCompliance(int wheelId, const PxwVehicleSuspensionComplianceDesc& d);
 		void SetTire(int wheelId, const PxwVehicleTireDesc& d);
@@ -52,6 +54,9 @@ namespace pxw
 		bool IsFinalized() const { return mFinalized; }
 		PxScene* Scene() const { return mScene; }
 
+		// Rebind after a deterministic world replaces its PxScene. The chassis must
+		// already be detached before changing scenes.
+		void SetScene(PxScene* scene);
 		void AddToScene();
 		// wakeOnLostTouch defaults to true to match PxScene::removeActor. A synchronised
 		// rebuild passes false so tearing the chassis out does not perturb the sleep state
@@ -70,6 +75,15 @@ namespace pxw
 		void GetWheelStates(PxwVehicleWheelState* dest, int length);
 		void GetDriveState(PxwVehicleDriveState* dest);
 		PxRigidBody* GetActor();
+		bool IsWheelShape(const PxShape* shape) const;
+
+		// Fills wheelIds and localPoses (in axle order) with the construction-time wheel-shape
+		// local poses that carry cylinder axis alignment (physxWheelShapeLocalPoses). Returns
+		// the wheel count, or 0 when the vehicle is not finalized. These are NOT the runtime
+		// PxShape poses Vehicle2 rewrites every step: the vehicle composes its per-step pose
+		// with the one held here, so this one is immutable construction and belongs in the
+		// construction hash. capacity must be at least PxVehicleLimits::eMAX_NB_WHEELS.
+		PxU32 GetWheelShapeConstructionPoses(PxU32* wheelIds, PxTransform* localPoses, PxU32 capacity) const;
 
 		// --- Rollback integrator state ---
 		// Only the state the vehicle integrates over time is (de)serialised here:
@@ -100,6 +114,11 @@ namespace pxw
 		PxwVehicleChassisDesc mChassis;
 		const PxGeometry* mChassisGeometry;
 		PxMaterial* mMaterial;
+
+		// Per-wheel collision shape configuration, consumed once by Finalize. Defaults to the
+		// non-colliding cooked prism Vehicle2 has always used, so a caller that never calls
+		// SetWheelShape gets exactly the previous behaviour.
+		WheelShapeConfig mWheelShapes[PxVehicleLimits::eMAX_NB_WHEELS];
 
 		PxwDirectDriveVehicle* mDirect;
 		PxwEngineDriveVehicle* mEngine;

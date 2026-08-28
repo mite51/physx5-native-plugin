@@ -79,7 +79,9 @@ namespace pxw
 		PxwTransformData cmassLocalPose;
 		// Used only when no explicit chassis geometry is supplied to CreateVehicle.
 		PxVec3 boxHalfExtents;
-		PxwTransformData boxLocalPose;
+		// Local pose of the chassis collision shape, applied to a caller-supplied chassis
+		// geometry just as much as to the fallback box, hence not named after the box.
+		PxwTransformData shapeLocalPose;
 	};
 
 	struct PxwVehicleWheelDesc
@@ -89,6 +91,55 @@ namespace pxw
 		float mass;
 		float moi;
 		float dampingRate;
+	};
+
+	// How a wheel's collision shape gets its geometry.
+	struct PxwVehicleWheelGeometryMode
+	{
+		enum Enum
+		{
+			// The cooked 16-sided convex prism PxVehiclePhysXActorCreate would have built, from
+			// the wheel's radius and half width. Reproduced byte for byte by this plugin so the
+			// default configuration is unchanged by the geometry override existing.
+			eCOOKED_PRISM = 0,
+
+			// A true cylinder (convex core), sized from the wheel's radius and half width. The
+			// prism's facets rotate with the wheel because the vehicle writes the spin angle into
+			// the shape's local pose every step, so contact points snap from facet to facet as it
+			// turns. A cylinder is rotationally invariant and does not do that, which matters as
+			// soon as the wheel is a simulation shape.
+			eCYLINDER = 1,
+
+			// A caller-supplied PxGeometry, used as-is.
+			eGEOMETRY = 2
+		};
+	};
+
+	// Per-wheel collision shape configuration, applied when the vehicle is finalized.
+	//
+	// The defaults reproduce the historical behaviour exactly: a cooked prism that is neither a
+	// simulation nor a scene query shape, so wheels collide with nothing and are invisible to
+	// raycasts. Vehicle2 drives wheels from suspension raycasts and the tire model, so that is
+	// a deliberate default rather than an oversight.
+	//
+	// Enabling sceneQueryShape is harmless: it lets gameplay raycasts and overlaps hit a wheel
+	// without changing anything the solver does.
+	//
+	// Enabling simulationShape is not harmless on its own. The suspension raycast and tire model
+	// already resolve the wheel against the ground, and the wheel's local pose puts its contact
+	// patch exactly at the ground surface, so a simulation wheel also generates rigid contacts
+	// with the road: the road ends up resolved twice, the vehicle rides high on the doubled
+	// normal force and contact friction fights the tire model's steering. Give wheels a collision
+	// group that does not collide with the drivable surface (see SetGroupCollisionFlag) so they
+	// only meet walls, obstacles and other vehicles.
+	struct PxwVehicleWheelShapeDesc
+	{
+		int geometryMode;      // PxwVehicleWheelGeometryMode::Enum
+		int simulationShape;   // non-zero adds PxShapeFlag::eSIMULATION_SHAPE
+		int sceneQueryShape;   // non-zero adds PxShapeFlag::eSCENE_QUERY_SHAPE
+		float margin;          // convex core margin, used by eCYLINDER
+		PxU32 simFilterData[4];
+		PxU32 queryFilterData[4];
 	};
 
 	struct PxwVehicleSuspensionDesc

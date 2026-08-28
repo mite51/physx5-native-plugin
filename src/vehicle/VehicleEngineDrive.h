@@ -123,7 +123,8 @@ public:
 	};
 
 	bool initialize(PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial,
-		Enum differentialType, bool addPhysXBeginEndComponents=true, const PxGeometry* chassisGeometry = NULL);
+		Enum differentialType, bool addPhysXBeginEndComponents=true, const PxGeometry* chassisGeometry = NULL,
+		const WheelShapeConfig* wheelShapeConfigs = NULL);
 	virtual void destroy();
 
 	virtual void initComponentSequence(bool addPhysXBeginEndComponents);

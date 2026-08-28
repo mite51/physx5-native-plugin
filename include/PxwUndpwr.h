@@ -610,6 +610,19 @@ extern "C"
     /// Same contract as PxwWorldHashConstruction, one record per registered entry.
     PHYSX_WRAPPER_API PxU32 PxwWorldHashConstructionPerEntry(pxw::PxwWorld* world, pxw::PxwEntryHash* dst, PxU32 capacity);
 
+    /// Diagnostic construction sub-hashes: 0=actor/shapes, 1=rigid-body, 2=dynamic
+    /// solver, 3=actor flags/count, 4=geometry, 5=shape metadata, 6=materials,
+    /// 7=local poses, 8=offsets, 9=shape flags, 10/11=simulation/query filters,
+    /// 12=vehicle wheel-shape construction poses (cylinder axis alignment).
+    ///
+    /// Vehicle-aware: parts 0/5/7 exclude the runtime wheel-shape poses Vehicle2 rewrites
+    /// every step (matching PxwWorldHashConstruction), and part 12 carries the construction
+    /// pose those wheels are built with instead. A non-vehicle entry reports nothing for
+    /// part 12. The process-global collision group table is folded only into the aggregate
+    /// PxwWorldHashConstruction, never into a per-entry part: if the aggregate hashes differ
+    /// while every per-entry part matches, the group table is the difference.
+    PHYSX_WRAPPER_API PxU32 PxwWorldHashConstructionPartPerEntry(pxw::PxwWorld* world, pxw::PxwEntryHash* dst, PxU32 capacity, PxU32 part);
+
     /// Link poses for one registered articulation, in PhysX link-index order.
     PHYSX_WRAPPER_API PxU32 PxwWorldReadArticulationLinkPoses(pxw::PxwWorld* world, PxU32 stableId, pxw::PxwTransformData* dst, PxU32 capacity);
 

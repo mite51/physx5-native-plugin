@@ -60,6 +60,9 @@ namespace pxw
 		else
 			mDirect = new PxwDirectDriveVehicle();
 
+		for (PxU32 i = 0; i < PxVehicleLimits::eMAX_NB_WHEELS; ++i)
+			mWheelShapes[i].setToDefault();
+
 		BaseVehicleParams& base = Base();
 
 		// Frame (Unity convention by default: lng = +Z, lat = +X, vrt = +Y).
@@ -94,7 +97,7 @@ namespace pxw
 		PhysXIntegrationParams& px = PhysXParams();
 		px.physxActorCMassLocalPose = chassis.cmassLocalPose.ToPxTransform();
 		px.physxActorBoxShapeHalfExtents = chassis.boxHalfExtents;
-		px.physxActorBoxShapeLocalPose = chassis.boxLocalPose.ToPxTransform();
+		px.physxActorBoxShapeLocalPose = chassis.shapeLocalPose.ToPxTransform();
 
 		if (mDirect)
 		{
@@ -228,6 +231,14 @@ namespace pxw
 		w.mass = d.mass;
 		w.moi = d.moi;
 		w.dampingRate = d.dampingRate;
+	}
+
+	void PxwVehicle::SetWheelShape(int wheelId, const PxwVehicleWheelShapeDesc& d, const PxGeometry* geometry)
+	{
+		if (wheelId < 0 || wheelId >= PxVehicleLimits::eMAX_NB_WHEELS)
+			return;
+		mWheelShapes[wheelId].desc = d;
+		mWheelShapes[wheelId].geometry = geometry;
 	}
 
 	void PxwVehicle::SetSuspension(int wheelId, const PxwVehicleSuspensionDesc& d)
@@ -511,14 +522,14 @@ namespace pxw
 			else if (mDiffType == PxwVehicleDifferentialType::eTANK)
 				diff = EngineDriveVehicle::eDIFFTYPE_TANKDRIVE;
 
-			ok = mEngine->initialize(*physics, cooking, *mat, diff, true, mChassisGeometry);
+			ok = mEngine->initialize(*physics, cooking, *mat, diff, true, mChassisGeometry, mWheelShapes);
 		}
 		else
 		{
 			// Direct-drive: when the host drives the wheels directly the PhysX
 			// begin/end components are still required; only the command-response
 			// component is skipped (handled via mUseDirectWheelControl).
-			ok = mDirect->initialize(*physics, cooking, *mat, true, mChassisGeometry);
+			ok = mDirect->initialize(*physics, cooking, *mat, true, mChassisGeometry, mWheelShapes);
 		}
 
 		mFinalized = ok;
@@ -535,6 +546,12 @@ namespace pxw
 			mScene->addActor(*body);
 			mInScene = true;
 		}
+	}
+
+	void PxwVehicle::SetScene(PxScene* scene)
+	{
+		if (scene != NULL && !mInScene)
+			mScene = scene;
 	}
 
 	void PxwVehicle::RemoveFromScene(bool wakeOnLostTouch)
@@ -657,10 +674,42 @@ namespace pxw
 		return ActorVehicle()->mPhysXState.physxActor.rigidBody;
 	}
 
+	bool PxwVehicle::IsWheelShape(const PxShape* shape) const
+	{
+		const PhysXActorVehicle* vehicle = ActorVehicleConst();
+		if (vehicle == NULL || shape == NULL)
+			return false;
+		for (PxU32 i = 0; i < PxVehicleLimits::eMAX_NB_WHEELS; ++i)
+		{
+			if (vehicle->mPhysXState.physxActor.wheelShapes[i] == shape)
+				return true;
+		}
+		return false;
+	}
+
 	PxU32 PxwVehicle::GetWheelCount() const
 	{
 		const PhysXActorVehicle* v = ActorVehicleConst();
 		return v ? v->mBaseParams.axleDescription.nbWheels : 0u;
+	}
+
+	PxU32 PxwVehicle::GetWheelShapeConstructionPoses(PxU32* wheelIds, PxTransform* localPoses, PxU32 capacity) const
+	{
+		const PhysXActorVehicle* v = ActorVehicleConst();
+		if (v == NULL || wheelIds == NULL || localPoses == NULL)
+			return 0u;
+
+		// Axle order, matching CaptureSnapshot and the construction-hash conventions, so two
+		// peers with the same axle description lay these out identically.
+		const PxVehicleAxleDescription& axle = v->mBaseParams.axleDescription;
+		const PxU32 count = axle.nbWheels < capacity ? axle.nbWheels : capacity;
+		for (PxU32 i = 0; i < count; ++i)
+		{
+			const PxU32 wheelId = axle.wheelIdsInAxleOrder[i];
+			wheelIds[i] = wheelId;
+			localPoses[i] = v->mPhysXParams.physxWheelShapeLocalPoses[wheelId];
+		}
+		return count;
 	}
 
 	PxU32 PxwVehicle::SnapshotSize() const

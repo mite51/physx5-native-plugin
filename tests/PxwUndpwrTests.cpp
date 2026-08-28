@@ -1995,6 +1995,140 @@ namespace
 		perturbed.Destroy();
 	}
 
+	// A world holding one body with a single caller-supplied shape, for comparing how the
+	// construction hash treats geometries the box-based harness above cannot express.
+	struct GeometryTestWorld
+	{
+		PxwWorld* world;
+		PxRigidDynamic* body;
+
+		GeometryTestWorld() : world(NULL), body(NULL) {}
+
+		void Build(const PxGeometry& geometry)
+		{
+			PxwSceneDesc desc = MakeDeterministicSceneDesc();
+			world = PxwWorldCreate(&desc);
+
+			PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+			PxMaterial* material = physics->createMaterial(0.6f, 0.5f, 0.1f);
+			body = physics->createRigidDynamic(PxTransform(PxVec3(0.0f, 5.0f, 0.0f)));
+
+			PxShape* shape = physics->createShape(geometry, *material, true);
+			body->attachShape(*shape);
+			shape->release();
+			material->release();
+
+			PxwSetupDeterministicMass(body, 10.0f, -1.0f, false, NULL);
+			PxwApplyDeterministicRigidDefaults(body, 8, 2);
+
+			PxwWorldRegister(world, 100, body, PxwHandleKind::eRIGID_DYNAMIC);
+			PxwWorldCommitPending(world);
+		}
+
+		PxU64 Hash() const { return PxwWorldHashConstruction(world); }
+
+		void Destroy()
+		{
+			if (world != NULL)
+			{
+				PxwWorldDestroy(world);
+				world = NULL;
+				body = NULL;
+			}
+		}
+	};
+
+	PxU64 HashOfWorldWith(const PxGeometry& geometry)
+	{
+		GeometryTestWorld w;
+		w.Build(geometry);
+		const PxU64 hash = w.Hash();
+		w.Destroy();
+		return hash;
+	}
+
+	// Convex core geometry has to be hashed more carefully than any other geometry type.
+	// PxConvexCoreGeometry holds a fixed PxU8[24] core buffer but memcpys only sizeof(Core)
+	// bytes into it -- eight, for a cylinder -- and leaves the rest of the buffer at whatever
+	// the stack or the allocator happened to contain. Hashing the buffer wholesale would
+	// therefore fold uninitialised memory into the construction hash, and two peers holding
+	// genuinely identical cylinders would report a construction mismatch that has nothing to do
+	// with how either of them was built. Only the active core's bytes may participate.
+	void TestConstructionHashDescribesConvexCores()
+	{
+		std::printf("TestConstructionHashDescribesConvexCores\n");
+
+		const PxConvexCoreGeometry cylinder(PxConvexCore::Cylinder(0.3f, 0.35f), 0.0f);
+
+		Check(HashOfWorldWith(cylinder) == HashOfWorldWith(cylinder),
+			"two worlds holding the same cylinder hash identically");
+
+		// Every parameter of the shape has to reach the hash, or a peer that authored a
+		// slightly different wheel would look identical.
+		Check(HashOfWorldWith(cylinder) != HashOfWorldWith(PxConvexCoreGeometry(PxConvexCore::Cylinder(0.3f, 0.3500001f), 0.0f)),
+			"the construction hash notices a cylinder radius that differs by one step");
+		Check(HashOfWorldWith(cylinder) != HashOfWorldWith(PxConvexCoreGeometry(PxConvexCore::Cylinder(0.3000001f, 0.35f), 0.0f)),
+			"the construction hash notices a cylinder height that differs by one step");
+		Check(HashOfWorldWith(cylinder) != HashOfWorldWith(PxConvexCoreGeometry(PxConvexCore::Cylinder(0.3f, 0.35f), 0.01f)),
+			"the construction hash notices a different margin");
+
+		// A cone and a cylinder with the same numbers are different shapes whose core bytes are
+		// identical, so the core type has to participate in its own right.
+		Check(HashOfWorldWith(cylinder) != HashOfWorldWith(PxConvexCoreGeometry(PxConvexCore::Cone(0.3f, 0.35f), 0.0f)),
+			"the construction hash distinguishes a cone from a cylinder with the same dimensions");
+
+		// The headline case. Two cylinders that describe the same shape, one with garbage in the
+		// core bytes the cylinder core does not use, must hash the same: that garbage is exactly
+		// what differs between two processes that did the same thing.
+		PxConvexCoreGeometry scribbled(PxConvexCore::Cylinder(0.3f, 0.35f), 0.0f);
+		PxU8* coreBytes = const_cast<PxU8*>(static_cast<const PxU8*>(scribbled.getCoreData()));
+		for (PxU32 i = sizeof(PxReal) * 2; i < PxConvexCoreGeometry::MAX_CORE_SIZE; ++i)
+		{
+			coreBytes[i] = static_cast<PxU8>(0xAB);
+		}
+
+		Check(HashOfWorldWith(cylinder) == HashOfWorldWith(scribbled),
+			"the construction hash ignores the core bytes a cylinder does not use");
+	}
+
+	// The collision group table decides whether two shapes are allowed to touch at all, so
+	// peers that disagree about it simulate differently while every actor, shape and geometry
+	// hashes the same. It is also not scene state: PhysX extensions keeps it process-global, so
+	// no other part of the construction hash can stand in for it.
+	void TestConstructionHashIncludesCollisionGroupTable()
+	{
+		std::printf("TestConstructionHashIncludesCollisionGroupTable\n");
+
+		GeometryTestWorld w;
+		w.Build(PxBoxGeometry(0.5f, 0.5f, 0.5f));
+
+		const PxU64 allCollide = w.Hash();
+
+		SetGroupCollisionFlag(1, 2, false);
+		const PxU64 pairDisabled = w.Hash();
+		Check(pairDisabled != allCollide,
+			"the construction hash notices a group pair that no longer collides");
+
+		// The table is symmetric, so naming the pair the other way round is the same entry
+		// rather than a second one.
+		SetGroupCollisionFlag(2, 1, false);
+		Check(w.Hash() == pairDisabled,
+			"the construction hash treats a group pair as symmetric");
+
+		SetGroupCollisionFlag(3, 4, false);
+		Check(w.Hash() != pairDisabled,
+			"the construction hash notices a second disabled group pair");
+
+		// Only disabled pairs contribute, so restoring the all-collide default has to restore
+		// the original hash exactly. That is what lets filtering be added to a session without
+		// invalidating the hash of every world that does not use it.
+		ResetGroupCollisionFlags();
+		Check(w.Hash() == allCollide,
+			"resetting the group table restores the hash a world with no filtering had");
+
+		w.Destroy();
+	}
+
 	// Applying replicated properties must be verbatim, otherwise replicating them
 	// solves nothing.
 	void TestApplyMassIsVerbatim()
@@ -3221,6 +3355,294 @@ namespace
 	}
 
 	// ---------------------------------------------------------------------------
+	// Convex core narrowphase soak
+	//
+	// Convex core shapes are solved by GJK against a support function rather than by the
+	// polygonal paths every other geometry here uses, so they are a different narrowphase code
+	// path with its own iteration and termination behaviour. Before wheels are allowed to depend
+	// on it, that path has to be shown to be bit-reproducible under rollback: a shape that is
+	// merely *nearly* reproducible would desync a session at some unpredictable later moment,
+	// and the cause would be almost impossible to attribute back to the wheel geometry.
+	//
+	// The test drops cylinders onto a triangle mesh and spins them, which is the demanding case
+	// for two reasons. Contact against a mesh is resolved per triangle, so a rolling cylinder
+	// crosses triangle boundaries constantly and re-derives its contact set as it goes. And a
+	// cylinder's contact patch is a line rather than a point or a facet, so which features GJK
+	// settles on genuinely depends on the iteration.
+
+	// A gently uneven triangle mesh floor. Deliberately not flat: a flat grid lets every contact
+	// land on a coplanar pair of triangles, which is the easy case and not the one that matters.
+	PxTriangleMesh* CreateUnevenMeshFloor()
+	{
+		const PxU32 kCells = 8;
+		const PxReal kCellSize = 1.0f;
+		const PxU32 kVertsPerSide = kCells + 1;
+
+		std::vector<PxVec3> vertices;
+		vertices.reserve(kVertsPerSide * kVertsPerSide);
+		for (PxU32 z = 0; z < kVertsPerSide; ++z)
+		{
+			for (PxU32 x = 0; x < kVertsPerSide; ++x)
+			{
+				const PxReal fx = (static_cast<PxReal>(x) - kCells * 0.5f) * kCellSize;
+				const PxReal fz = (static_cast<PxReal>(z) - kCells * 0.5f) * kCellSize;
+				const PxReal fy = 0.03f * PxSin(fx * 0.9f) * PxCos(fz * 0.7f);
+				vertices.push_back(PxVec3(fx, fy, fz));
+			}
+		}
+
+		std::vector<PxU32> indices;
+		indices.reserve(kCells * kCells * 6);
+		for (PxU32 z = 0; z < kCells; ++z)
+		{
+			for (PxU32 x = 0; x < kCells; ++x)
+			{
+				const PxU32 v0 = z * kVertsPerSide + x;
+				const PxU32 v1 = v0 + 1;
+				const PxU32 v2 = v0 + kVertsPerSide;
+				const PxU32 v3 = v2 + 1;
+				indices.push_back(v0); indices.push_back(v2); indices.push_back(v1);
+				indices.push_back(v1); indices.push_back(v2); indices.push_back(v3);
+			}
+		}
+
+		return GetGlobalPhysXWrapper().CreateBV33TriangleMesh(
+			static_cast<PxU32>(vertices.size()), vertices.data(),
+			static_cast<PxU32>(indices.size() / 3), indices.data(),
+			false, false, false, false, false, false);
+	}
+
+	struct ConvexCoreSoakWorld
+	{
+		PxwWorld* world;
+		PxTriangleMesh* mesh;
+
+		ConvexCoreSoakWorld() : world(NULL), mesh(NULL) {}
+
+		// useCylinder selects the shape under test; false substitutes a box of the same
+		// dimensions, which is the control. Whatever the mesh contact path does to
+		// reproducibility, it does to both, so comparing them isolates the convex core.
+		void Build(bool useCylinder)
+		{
+			PxwSceneDesc desc = MakeDeterministicSceneDesc();
+			world = PxwWorldCreate(&desc);
+			// Sleeping would end the test early and hide any divergence after it.
+			PxwWorldSetSleepParams(world, 0.0f, 0.0f, 0u);
+
+			PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+			PxMaterial* material = physics->createMaterial(0.7f, 0.7f, 0.05f);
+
+			mesh = CreateUnevenMeshFloor();
+			{
+				PxTriangleMeshGeometry meshGeom(mesh);
+				PxShape* shape = physics->createShape(meshGeom, *material, true);
+				PxRigidStatic* floor = physics->createRigidStatic(PxTransform(PxVec3(0.0f, 0.0f, 0.0f)));
+				floor->attachShape(*shape);
+				shape->release();
+				PxwWorldRegister(world, 1u, floor, PxwHandleKind::eRIGID_STATIC);
+			}
+
+			// Four cylinders: two dropped flat to settle and rest, two spun up to roll across
+			// the mesh. Resting and rolling stress different things, so both are present.
+			for (PxU32 i = 0; i < 4; ++i)
+			{
+				const bool rolling = (i >= 2);
+				const PxReal x = -1.5f + static_cast<PxReal>(i) * 1.0f;
+
+				const PxConvexCoreGeometry cylinder(PxConvexCore::Cylinder(0.3f, 0.35f), 0.0f);
+				const PxBoxGeometry box(0.15f, 0.35f, 0.35f);
+				PxShape* shape = useCylinder
+					? physics->createShape(cylinder, *material, true)
+					: physics->createShape(box, *material, true);
+				// Rolls about the world X axis, which is already the cylinder core's own axis, so
+				// the wheel-like orientation needs no rotation here.
+				PxRigidDynamic* body = physics->createRigidDynamic(
+					PxTransform(PxVec3(x, 0.9f + 0.1f * static_cast<PxReal>(i), rolling ? -2.0f : 1.0f)));
+				body->attachShape(*shape);
+				shape->release();
+
+				PxwSetupDeterministicMass(body, 500.0f, -1.0f, false, NULL);
+				PxwApplyDeterministicRigidDefaults(body, 8, 2);
+				if (rolling)
+				{
+					body->setAngularVelocity(PxVec3(6.0f, 0.0f, 0.0f));
+					body->setLinearVelocity(PxVec3(0.0f, 0.0f, 2.0f));
+				}
+
+				PxwWorldRegister(world, 100u + i, body, PxwHandleKind::eRIGID_DYNAMIC);
+			}
+
+			material->release();
+			PxwWorldCommitPending(world);
+		}
+
+		void Destroy()
+		{
+			if (world != NULL)
+			{
+				PxwWorldDestroy(world);
+				world = NULL;
+			}
+			if (mesh != NULL)
+			{
+				mesh->release();
+				mesh = NULL;
+			}
+		}
+
+		std::vector<PxU8> Capture()
+		{
+			std::vector<PxU8> buffer(PxwWorldStateSize(world));
+			PxU64 hash = 0;
+			const PxU32 written = PxwWorldCaptureState(world, buffer.data(), static_cast<PxU32>(buffer.size()), &hash);
+			buffer.resize(written);
+			return buffer;
+		}
+	};
+
+	PxU64 SoakHash(ConvexCoreSoakWorld& world)
+	{
+		const std::vector<PxU8> snapshot = world.Capture();
+		return PxwHashBuffer(snapshot.data(), static_cast<PxU32>(snapshot.size()));
+	}
+
+	// The requirement a networked session actually has: two peers running the same world through
+	// the same rollback pattern must agree, tick for tick.
+	bool SoakPeersAgree(bool useCylinder, int ticks)
+	{
+		ConvexCoreSoakWorld a, b;
+		a.Build(useCylinder);
+		b.Build(useCylinder);
+
+		std::vector<PxU8> snapA = a.Capture();
+		std::vector<PxU8> snapB = b.Capture();
+
+		bool identical = true;
+		for (int tick = 0; tick < ticks; ++tick)
+		{
+			PxwWorldRestoreState(a.world, snapA.data(), static_cast<PxU32>(snapA.size()));
+			PxwWorldStep(a.world, kDt);
+			snapA = a.Capture();
+
+			PxwWorldRestoreState(b.world, snapB.data(), static_cast<PxU32>(snapB.size()));
+			PxwWorldStep(b.world, kDt);
+			snapB = b.Capture();
+
+			if (PxwHashBuffer(snapA.data(), static_cast<PxU32>(snapA.size()))
+				!= PxwHashBuffer(snapB.data(), static_cast<PxU32>(snapB.size())))
+			{
+				std::printf("        peers diverged at tick %d\n", tick);
+				identical = false;
+				break;
+			}
+		}
+
+		a.Destroy();
+		b.Destroy();
+		return identical;
+	}
+
+	// Rollback transparency: a run that rewinds and replays has to land on exactly the state a
+	// run that never rewound reached.
+	//
+	// Both sides hold the cold-step discipline the framework requires -- one restore before every
+	// step, including the steps nobody rolled back. That is not a detail of the test, it is the
+	// whole reason the property holds: a step after a restore narrowphases cold while a step
+	// after another step warm-starts from PhysX's persistent contact manifolds, and those
+	// manifolds are not in the snapshot because no public API exposes them. Restoring
+	// unconditionally makes every step cold, which removes the asymmetry rather than fixing it.
+	// `RollbackEngine` does exactly this, so an uninterrupted warm run is not a configuration
+	// that occurs at runtime and is deliberately not what this compares against.
+	bool SoakReplayMatchesUnrewoundRun(bool useCylinder, int ticks, int depth)
+	{
+		ConvexCoreSoakWorld reference, subject;
+		reference.Build(useCylinder);
+		subject.Build(useCylinder);
+
+		// Reference: never rewinds, but still restores before every step.
+		std::vector<std::vector<PxU8> > referenceSnapshots;
+		std::vector<PxU64> referenceHashes;
+		referenceSnapshots.push_back(reference.Capture());
+		referenceHashes.push_back(SoakHash(reference));
+		for (int tick = 1; tick <= ticks; ++tick)
+		{
+			const std::vector<PxU8>& previous = referenceSnapshots[static_cast<size_t>(tick) - 1];
+			PxwWorldRestoreState(reference.world, previous.data(), static_cast<PxU32>(previous.size()));
+			PxwWorldStep(reference.world, kDt);
+			referenceSnapshots.push_back(reference.Capture());
+			referenceHashes.push_back(SoakHash(reference));
+		}
+
+		// Subject: the same run, except that every `depth` ticks it throws away the window it
+		// just simulated and resimulates it from its own snapshot, which is what a peer receiving
+		// a late input does.
+		std::vector<std::vector<PxU8> > snapshots;
+		snapshots.push_back(subject.Capture());
+
+		bool matched = true;
+		for (int tick = 1; tick <= ticks && matched; ++tick)
+		{
+			const std::vector<PxU8>& previous = snapshots[static_cast<size_t>(tick) - 1];
+			PxwWorldRestoreState(subject.world, previous.data(), static_cast<PxU32>(previous.size()));
+			PxwWorldStep(subject.world, kDt);
+			snapshots.push_back(subject.Capture());
+
+			if (tick % depth == 0)
+			{
+				for (int replay = tick - depth + 1; replay <= tick; ++replay)
+				{
+					const std::vector<PxU8>& from = snapshots[static_cast<size_t>(replay) - 1];
+					PxwWorldRestoreState(subject.world, from.data(), static_cast<PxU32>(from.size()));
+					PxwWorldStep(subject.world, kDt);
+					snapshots[static_cast<size_t>(replay)] = subject.Capture();
+				}
+			}
+
+			if (SoakHash(subject) != referenceHashes[static_cast<size_t>(tick)])
+			{
+				std::printf("        replay diverged from the un-rewound run at tick %d\n", tick);
+				matched = false;
+			}
+		}
+
+		reference.Destroy();
+		subject.Destroy();
+		return matched;
+	}
+
+	void TestConvexCoreOnMeshIsReproducibleUnderRollback()
+	{
+		std::printf("TestConvexCoreOnMeshIsReproducibleUnderRollback [%s]\n", SolverName());
+
+		const int kTicks = 600;
+		const int kDepth = 8;
+		const std::string suffix = " [" + std::string(SolverName()) + "]";
+
+		Check(SoakPeersAgree(true, kTicks),
+			"two peers running cylinders on a triangle mesh agree for " + std::to_string(kTicks)
+			+ " rolled-back ticks" + suffix);
+
+		// Bit-exact replay is a PGS property in this framework; TGS is characterised rather than
+		// asserted, as it is everywhere else in the suite. The box is carried alongside so that a
+		// TGS shortfall can be read as the solver rather than the geometry.
+		const bool cylinderTransparent = SoakReplayMatchesUnrewoundRun(true, kTicks, kDepth);
+		const bool boxTransparent = SoakReplayMatchesUnrewoundRun(false, kTicks, kDepth);
+
+		if (gSolverType == PxSolverType::ePGS)
+		{
+			Check(cylinderTransparent,
+				"rewinding and replaying cylinders on a triangle mesh lands on the un-rewound state" + suffix);
+			Check(boxTransparent,
+				"the same holds for boxes, so the cylinder is not being held to a private standard" + suffix);
+		}
+		else
+		{
+			Observe(cylinderTransparent, "cylinder replay is bit-exact" + suffix);
+			Observe(boxTransparent, "box replay is bit-exact" + suffix);
+		}
+	}
+
+	// ---------------------------------------------------------------------------
 	// Vehicles
 	//
 	// A vehicle carries integrator state a plain rigid body does not: each wheel has
@@ -3235,19 +3657,25 @@ namespace
 
 	// A four-wheeled vehicle built directly on the pxw classes so the test can set the
 	// per-wheel parameters without going through the descriptor-heavy C API.
-	PxwVehicle* BuildTestVehicle(PxScene* scene, PxPhysics* physics, PxMaterial* material, bool engineDrive)
+	PxwVehicle* BuildTestVehicle(PxScene* scene, PxPhysics* physics, PxMaterial* material, bool engineDrive,
+		const PxwVehicleWheelShapeDesc* wheelShape = NULL, const PxwVehicleFrameDesc* frame = NULL)
 	{
 		PxwVehicleChassisDesc chassis;
 		chassis.mass = 1500.0f;
 		chassis.moi = PxVec3(3625.0f, 3625.0f, 3625.0f);
 		chassis.cmassLocalPose = PxwTransformData(PxTransform(PxIdentity));
 		chassis.boxHalfExtents = PxVec3(0.9f, 0.35f, 2.2f);
-		chassis.boxLocalPose = PxwTransformData(PxTransform(PxIdentity));
+		chassis.shapeLocalPose = PxwTransformData(PxTransform(PxIdentity));
 
 		const PxwVehicleDriveMode::Enum mode =
 			engineDrive ? PxwVehicleDriveMode::eENGINE : PxwVehicleDriveMode::eDIRECT;
 		// NULL chassis geometry: Finalize builds the fallback box from the descriptor.
 		PxwVehicle* v = new PxwVehicle(scene, mode, chassis, NULL, material);
+
+		// A non-default frame turns the wheel axis off the convex-core cylinder's local +X, so
+		// the cylinder wheel shapes pick up a non-identity axis-alignment construction pose.
+		if (frame != NULL)
+			v->SetFrame(*frame);
 
 		int nbWheelsPerAxle[2] = { 2, 2 };
 		int wheelIds[4] = { 0, 1, 2, 3 };
@@ -3270,6 +3698,13 @@ namespace
 			w.moi = 0.5f * 20.0f * wheelRadius * wheelRadius;
 			w.dampingRate = 0.25f;
 			v->SetWheel(i, w);
+
+			// Left alone by default, so the default path is exercised as the shipped
+			// configuration rather than as an explicit request for the same thing.
+			if (wheelShape != NULL)
+			{
+				v->SetWheelShape(i, *wheelShape, NULL);
+			}
 
 			PxwVehicleSuspensionDesc s;
 			s.suspensionAttachment = PxwTransformData(PxTransform(PxVec3(wheelXZ[i].x, 0.3f, wheelXZ[i].z)));
@@ -3346,7 +3781,8 @@ namespace
 
 		VehicleWorld() : world(NULL), vehicle(NULL), engine(false), throttle(0.0f) {}
 
-		void Build(bool engineDrive, float throttleCmd)
+		void Build(bool engineDrive, float throttleCmd, const PxwVehicleWheelShapeDesc* wheelShape = NULL,
+			const PxwVehicleFrameDesc* frame = NULL)
 		{
 			engine = engineDrive;
 			throttle = throttleCmd;
@@ -3368,7 +3804,7 @@ namespace
 				PxwWorldRegister(world, 1u, ground, PxwHandleKind::eRIGID_STATIC);
 			}
 
-			vehicle = BuildTestVehicle(scene, physics, material, engineDrive);
+			vehicle = BuildTestVehicle(scene, physics, material, engineDrive, wheelShape, frame);
 			PxwWorldRegister(world, 10u, vehicle, PxwHandleKind::eVEHICLE);
 			PxwWorldCommitPending(world);
 
@@ -3455,6 +3891,248 @@ namespace
 	};
 
 	const char* DriveName(bool engine) { return engine ? "engine drive" : "direct drive"; }
+
+	void TestVehicleConstructionHashSurvivesWheelPoseUpdates(bool engine)
+	{
+		std::printf("TestVehicleConstructionHashSurvivesWheelPoseUpdates [%s, %s]\n",
+			DriveName(engine), SolverName());
+
+		VehicleRunner runner;
+		runner.Build(engine, 1.0f);
+		const PxU64 before = PxwWorldHashConstruction(runner.world.world);
+		for (int tick = 0; tick < 20; ++tick)
+			runner.Tick(tick);
+		const PxU64 after = PxwWorldHashConstruction(runner.world.world);
+
+		Check(before == after,
+			"a vehicle construction hash excludes runtime wheel-shape poses ["
+			+ std::string(DriveName(engine)) + ", " + SolverName() + "]");
+		runner.Destroy();
+	}
+
+	// The plugin builds vehicle wheel shapes itself instead of letting
+	// PxVehiclePhysXActorCreate do it, because PxShape::setGeometry cannot change a shape's
+	// geometry type, so per-wheel geometry has to be decided when the shape is created. That
+	// makes the default path a regression risk: every existing vehicle has to keep the shape it
+	// had, or its construction hash moves and peers running different plugin versions cannot
+	// agree even though nobody asked for anything new.
+	void TestVehicleDefaultWheelShapesAreUnchanged(bool engine)
+	{
+		std::printf("TestVehicleDefaultWheelShapesAreUnchanged [%s, %s]\n",
+			DriveName(engine), SolverName());
+
+		const std::string suffix = " [" + std::string(DriveName(engine)) + ", " + SolverName() + "]";
+
+		PxwVehicleWheelShapeDesc explicitDefault;
+		std::memset(&explicitDefault, 0, sizeof(explicitDefault));
+		explicitDefault.geometryMode = PxwVehicleWheelGeometryMode::eCOOKED_PRISM;
+
+		VehicleWorld untouched, asked;
+		untouched.Build(engine, 0.0f);
+		asked.Build(engine, 0.0f, &explicitDefault);
+
+		Check(PxwWorldHashConstruction(untouched.world) == PxwWorldHashConstruction(asked.world),
+			"a vehicle left alone is built exactly like one that asks for the defaults" + suffix);
+
+		// The default really is the cooked prism, not a cylinder that happens to be consistent.
+		PxRigidBody* body = untouched.vehicle->GetActor();
+		bool everyWheelIsAConvexMesh = (body != NULL);
+		if (body != NULL)
+		{
+			const PxU32 shapeCount = body->getNbShapes();
+			// One chassis shape plus one per wheel.
+			everyWheelIsAConvexMesh = (shapeCount == 5);
+			for (PxU32 i = 1; i < shapeCount; ++i)
+			{
+				PxShape* shape = NULL;
+				body->getShapes(&shape, 1, i);
+				if (shape == NULL || shape->getGeometry().getType() != PxGeometryType::eCONVEXMESH)
+				{
+					everyWheelIsAConvexMesh = false;
+				}
+				// Wheels are raycast driven, so by default they must neither simulate nor be
+				// visible to scene queries.
+				else if (shape->getFlags() & (PxShapeFlag::eSIMULATION_SHAPE | PxShapeFlag::eSCENE_QUERY_SHAPE))
+				{
+					everyWheelIsAConvexMesh = false;
+				}
+			}
+		}
+		Check(everyWheelIsAConvexMesh,
+			"a default vehicle's wheels are still non-colliding cooked convex hulls" + suffix);
+
+		// And the overrides have to actually reach the shapes, or the setting is decoration.
+		PxwVehicleWheelShapeDesc cylinderMode = explicitDefault;
+		cylinderMode.geometryMode = PxwVehicleWheelGeometryMode::eCYLINDER;
+
+		PxwVehicleWheelShapeDesc queryable = explicitDefault;
+		queryable.sceneQueryShape = 1;
+
+		PxwVehicleWheelShapeDesc grouped = explicitDefault;
+		grouped.simFilterData[0] = 3u;
+
+		VehicleWorld cylinder, sceneQuery, filtered;
+		cylinder.Build(engine, 0.0f, &cylinderMode);
+		sceneQuery.Build(engine, 0.0f, &queryable);
+		filtered.Build(engine, 0.0f, &grouped);
+
+		const PxU64 baseline = PxwWorldHashConstruction(untouched.world);
+		Check(PxwWorldHashConstruction(cylinder.world) != baseline,
+			"choosing cylinder wheels changes the construction hash" + suffix);
+		Check(PxwWorldHashConstruction(sceneQuery.world) != baseline,
+			"making wheels visible to scene queries changes the construction hash" + suffix);
+		Check(PxwWorldHashConstruction(filtered.world) != baseline,
+			"giving wheels a collision group changes the construction hash" + suffix);
+
+		untouched.Destroy();
+		asked.Destroy();
+		cylinder.Destroy();
+		sceneQuery.Destroy();
+		filtered.Destroy();
+	}
+
+	// A cylinder wheel is only worth having if it simulates as reproducibly as the hull it
+	// replaces: convex core narrowphase is a different code path, and a vehicle that rolls
+	// deterministically on cooked hulls but not on cylinders would be worse than no option.
+	void TestVehicleCylinderWheelsAreDeterministic(bool engine)
+	{
+		std::printf("TestVehicleCylinderWheelsAreDeterministic [%s, %s]\n",
+			DriveName(engine), SolverName());
+
+		PxwVehicleWheelShapeDesc cylinderMode;
+		std::memset(&cylinderMode, 0, sizeof(cylinderMode));
+		cylinderMode.geometryMode = PxwVehicleWheelGeometryMode::eCYLINDER;
+		cylinderMode.simulationShape = 1;
+		// Group 1 for the wheels, and the ground is left in group 0, so the road stays the
+		// tire model's job while the wheels are still solid against everything else. Without
+		// this the road would be resolved twice.
+		cylinderMode.simFilterData[0] = 1u;
+		SetGroupCollisionFlag(1, 0, false);
+
+		VehicleRunner a, b;
+		a.world.Build(engine, 1.0f, &cylinderMode);
+		a.snapshot = a.world.Capture();
+		b.world.Build(engine, 1.0f, &cylinderMode);
+		b.snapshot = b.world.Capture();
+
+		bool identical = true;
+		for (int tick = 0; tick < 200; ++tick)
+		{
+			a.Tick(tick);
+			b.Tick(tick);
+			if (a.SnapshotHash() != b.SnapshotHash())
+			{
+				std::printf("        diverged at tick %d\n", tick);
+				identical = false;
+				break;
+			}
+		}
+		Check(identical,
+			"two vehicles on simulating cylinder wheels stay bit-identical for 200 ticks ["
+			+ std::string(DriveName(engine)) + ", " + SolverName() + "]");
+
+		a.Destroy();
+		b.Destroy();
+		ResetGroupCollisionFlags();
+	}
+
+	// Reads the diagnostic per-entry construction sub-hash for one registered entry, or 0 if
+	// the entry is not reported for that part.
+	PxU64 ReadEntryConstructionPart(PxwWorld* world, PxU32 stableId, PxU32 part)
+	{
+		PxwEntryHash records[8];
+		const PxU32 count = PxwWorldHashConstructionPartPerEntry(world, records, 8, part);
+		for (PxU32 i = 0; i < count; ++i)
+		{
+			if (records[i].stableId == stableId)
+				return records[i].hash;
+		}
+		return 0u;
+	}
+
+	// The construction hash has to see a wheel's cylinder-axis alignment, because a convex-core
+	// cylinder is frame-independent geometry: two peers whose vehicle frames disagree build the
+	// same wheel geometry and would hash equal on it alone, yet their wheels point different ways.
+	// That difference lives in the construction-time wheel-shape local pose (physxWheelShapeLocalPoses),
+	// which is the axis-alignment rotation the vehicle composes with the runtime PxShape pose it
+	// rewrites every step. The hash must fold in that construction pose while still ignoring the
+	// runtime pose, and must not move a rig whose pose is identity (the shipped Unity frame, where
+	// the wheel axis already is the cylinder's local +X). Part 12 exposes this contribution alone.
+	void TestVehicleConstructionHashIncludesWheelShapeLocalPoses(bool engine)
+	{
+		std::printf("TestVehicleConstructionHashIncludesWheelShapeLocalPoses [%s, %s]\n",
+			DriveName(engine), SolverName());
+
+		const std::string suffix = " [" + std::string(DriveName(engine)) + ", " + SolverName() + "]";
+		const PxU32 vehicleId = 10u;
+
+		PxwVehicleWheelShapeDesc cylinderMode;
+		std::memset(&cylinderMode, 0, sizeof(cylinderMode));
+		cylinderMode.geometryMode = PxwVehicleWheelGeometryMode::eCYLINDER;
+
+		// A legal right-handed frame whose lateral axis is +Y rather than the shipped +X. The
+		// cylinder core runs along its own local +X, so this frame bakes a real 90-degree
+		// axis-alignment rotation into every wheel's construction pose.
+		PxwVehicleFrameDesc rotatedFrame;
+		rotatedFrame.lngAxis = PxwVehicleAxis::ePosX;
+		rotatedFrame.latAxis = PxwVehicleAxis::ePosY;
+		rotatedFrame.vrtAxis = PxwVehicleAxis::ePosZ;
+		rotatedFrame.scale = 1.0f;
+
+		VehicleWorld prism, cylDefault, cylDefaultTwin, cylRotated;
+		prism.Build(engine, 0.0f);
+		cylDefault.Build(engine, 0.0f, &cylinderMode);
+		cylDefaultTwin.Build(engine, 0.0f, &cylinderMode);
+		cylRotated.Build(engine, 0.0f, &cylinderMode, &rotatedFrame);
+
+		const PxU64 prism12 = ReadEntryConstructionPart(prism.world, vehicleId, 12u);
+		const PxU64 cylDef12 = ReadEntryConstructionPart(cylDefault.world, vehicleId, 12u);
+		const PxU64 cylDefTwin12 = ReadEntryConstructionPart(cylDefaultTwin.world, vehicleId, 12u);
+		const PxU64 cylRot12 = ReadEntryConstructionPart(cylRotated.world, vehicleId, 12u);
+
+		// Backward compatibility: on the shipped frame the axis pose is identity, so the sparse
+		// contract adds nothing and part 12 matches the cooked-prism default it always did.
+		Check(cylDef12 == prism12,
+			"a default-frame cylinder keeps the prism default's empty wheel-pose hash" + suffix);
+		Check(cylDef12 == cylDefTwin12,
+			"part 12 is deterministic across identical cylinder builds" + suffix);
+
+		// The point of the change: a frame that rotates the cylinder axis off the wheel axis bakes
+		// a non-identity construction pose, and part 12 has to move to catch it.
+		Check(cylRot12 != cylDef12,
+			"a rotated frame's cylinder axis pose changes part 12" + suffix);
+
+		// The aggregate hash must carry the same separation: two cylinder vehicles that agree on
+		// wheel geometry but not on frame are not built the same way.
+		const PxU64 cylDefAgg = PxwWorldHashConstruction(cylDefault.world);
+		const PxU64 cylRotAgg = PxwWorldHashConstruction(cylRotated.world);
+		Check(cylDefAgg != cylRotAgg,
+			"the aggregate construction hash separates cylinder frames" + suffix);
+
+		// The point of the sparse contract: the cylinder wheel's runtime PxShape pose moves every
+		// step, but the construction pose it is composed with does not. Neither the aggregate hash
+		// nor part 12 may move while the vehicle drives.
+		VehicleRunner runner;
+		runner.world.Build(engine, 1.0f, &cylinderMode);
+		runner.snapshot = runner.world.Capture();
+		const PxU64 aggBefore = PxwWorldHashConstruction(runner.world.world);
+		const PxU64 part12Before = ReadEntryConstructionPart(runner.world.world, vehicleId, 12u);
+		for (int tick = 0; tick < 20; ++tick)
+			runner.Tick(tick);
+		const PxU64 aggAfter = PxwWorldHashConstruction(runner.world.world);
+		const PxU64 part12After = ReadEntryConstructionPart(runner.world.world, vehicleId, 12u);
+
+		Check(aggBefore == aggAfter,
+			"driving cylinder wheels does not move the construction hash" + suffix);
+		Check(part12Before == part12After,
+			"driving cylinder wheels does not move part 12" + suffix);
+
+		prism.Destroy();
+		cylDefault.Destroy();
+		cylDefaultTwin.Destroy();
+		cylRotated.Destroy();
+		runner.Destroy();
+	}
 
 	void TestVehicleBaselineDeterminism(bool engine)
 	{
@@ -3640,6 +4318,15 @@ namespace
 	{
 		gSolverType = solver;
 
+		TestConvexCoreOnMeshIsReproducibleUnderRollback();
+		TestVehicleConstructionHashSurvivesWheelPoseUpdates(false);
+		TestVehicleConstructionHashSurvivesWheelPoseUpdates(true);
+		TestVehicleDefaultWheelShapesAreUnchanged(false);
+		TestVehicleDefaultWheelShapesAreUnchanged(true);
+		TestVehicleCylinderWheelsAreDeterministic(false);
+		TestVehicleCylinderWheelsAreDeterministic(true);
+		TestVehicleConstructionHashIncludesWheelShapeLocalPoses(false);
+		TestVehicleConstructionHashIncludesWheelShapeLocalPoses(true);
 		TestVehicleBaselineDeterminism(false);
 		TestVehicleBaselineDeterminism(true);
 		TestVehicleRestoreRoundTrip(false);
@@ -4084,6 +4771,8 @@ int main()
 	TestConstructionHashCatchesWhatMassAndStateHashesMiss();
 	TestConstructionHashCatchesSolverProperties();
 	TestConstructionHashPerEntryNamesTheBody();
+	TestConstructionHashDescribesConvexCores();
+	TestConstructionHashIncludesCollisionGroupTable();
 	TestApplyMassIsVerbatim();
 	TestMassHashDetectsMismatch();
 	TestCollapsedMassKeepsPoseRoundTripExact();

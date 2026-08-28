@@ -3,6 +3,8 @@
 #include <utility>
 #include <limits.h>
 #include "PxPhysicsAPI.h"
+// Not reachable through PxPhysicsAPI.h.
+#include "geometry/PxConvexCoreGeometry.h"
 #include "extensions/PxParticleExt.h"
 #include <list>
 #include <sstream>
@@ -245,6 +247,12 @@ namespace pxw {
 		static int CreateWeldedMeshIndices(const PxVec3* vertices, int numVertices, int* uniqueVerts, int* originalToUniqueMap, float threshold);
 
 		static PxGeometry* CreatePxGeometry(const PxGeometryType::Enum type, const int numShapeParams, const float* shapeParams, void* shapeRef);
+
+		// Convex core geometry is kept off CreatePxGeometry because it is parameterised by a
+		// core type and a margin, neither of which fits that function's (type, params, ref)
+		// shape. The core is a GJK support function; the collision shape is the core swept by
+		// margin, so a cylinder with a non-zero margin has rounded edges.
+		static PxGeometry* CreateConvexCoreGeometry(const PxConvexCore::Type coreType, const int numCoreParams, const float* coreParams, const float margin);
 
 		PxMaterial* CreateMaterial(const float staticFriction, const float dynamicFriction, const float restitution);
 

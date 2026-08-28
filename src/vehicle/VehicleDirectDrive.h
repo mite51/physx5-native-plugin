@@ -77,7 +77,8 @@ class DirectDriveVehicle
 	, public PxVehicleDirectDrivetrainComponent
 {
 public:
-	bool initialize(PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial, bool addPhysXBeginEndComponents = true, const PxGeometry* chassisGeometry = NULL);
+	bool initialize(PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial, bool addPhysXBeginEndComponents = true,
+		const PxGeometry* chassisGeometry = NULL, const WheelShapeConfig* wheelShapeConfigs = NULL);
 	virtual void destroy();
 
 	virtual void initComponentSequence(bool addPhysXBeginEndComponents);

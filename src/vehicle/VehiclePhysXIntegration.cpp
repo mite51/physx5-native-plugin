@@ -28,6 +28,9 @@
 
 #include "VehiclePhysXIntegration.h"
 
+#include "cooking/PxCooking.h"
+#include "extensions/PxDefaultStreams.h"
+
 namespace pxw
 {
 
@@ -76,10 +79,184 @@ PhysXIntegrationParams PhysXIntegrationParams::transformAndScale
 	return r;
 }
 
+namespace
+{
+
+// Cooks the wheel collision hull PxVehiclePhysXActorCreate builds: a 16-sided prism around the
+// wheel, from its radius and half width, in the vehicle's frame.
+//
+// This mirrors createShapes() in the SDK (VhPhysXActorHelpers.cpp) deliberately and exactly,
+// including the segment count, the vertex ordering and the cooking flags. Wheel shapes are
+// built here rather than by the SDK helper so each wheel can be given its own geometry, and
+// PxShape::setGeometry cannot change a shape's geometry type after the fact. Reproducing the
+// SDK's hull bit for bit is what keeps every existing vehicle - and its construction hash -
+// unchanged now that the plugin owns this step.
+PxConvexMesh* CookWheelPrism(const PxVehicleFrame& vehicleFrame, const PxVehicleWheelParams& wheelParams,
+	PxPhysics& physics, const PxCookingParams& params)
+{
+	const PxF32 radius = wheelParams.radius;
+	const PxF32 halfWidth = wheelParams.halfWidth;
+
+	PxVec3 verts[32];
+	for (PxU32 k = 0; k < 16; k++)
+	{
+		const PxF32 lng = radius * PxCos(k * 2.0f * PxPi / 16.0f);
+		const PxF32 lat = halfWidth;
+		const PxF32 vrt = radius * PxSin(k * 2.0f * PxPi / 16.0f);
+
+		const PxVec3 pos0 = vehicleFrame.getFrame() * PxVec3(lng, lat, vrt);
+		const PxVec3 pos1 = vehicleFrame.getFrame() * PxVec3(lng, -lat, vrt);
+		verts[2 * k + 0] = pos0;
+		verts[2 * k + 1] = pos1;
+	}
+
+	PxConvexMeshDesc convexDesc;
+	convexDesc.points.count = 32;
+	convexDesc.points.stride = sizeof(PxVec3);
+	convexDesc.points.data = verts;
+	convexDesc.flags = PxConvexFlag::eCOMPUTE_CONVEX;
+
+	PxDefaultMemoryOutputStream buf;
+	if (!PxCookConvexMesh(params, convexDesc, buf))
+		return NULL;
+
+	PxDefaultMemoryInputData id(buf.getData(), buf.getSize());
+	return physics.createConvexMesh(id);
+}
+
+// The cylinder equivalent of the cooked prism: same radius and width, but exact.
+//
+// The wheel's axis is the vehicle frame's lateral axis, while a convex core cylinder always
+// runs along its own local +X, so the geometry needs a rotation taking +X onto that axis. That
+// rotation belongs in the shape's local pose, except the vehicle overwrites wheel shape local
+// poses every step from the suspension and spin state. Instead the rotation is folded into the
+// wheel shape local pose the vehicle composes with, which is what physxWheelShapeLocalPoses is
+// for.
+PxQuat CylinderAxisRotation(const PxVehicleFrame& vehicleFrame)
+{
+	const PxVec3 wheelAxis = vehicleFrame.getLatAxis();
+	const PxVec3 cylinderAxis(1.0f, 0.0f, 0.0f);
+
+	const PxReal dot = cylinderAxis.dot(wheelAxis);
+	if (dot > 0.99999f)
+		return PxQuat(PxIdentity);
+	if (dot < -0.99999f)
+	{
+		// Antiparallel: any axis perpendicular to the cylinder axis will do for a half turn,
+		// and the shape is symmetric about its own axis so the choice is not observable.
+		return PxQuat(PxPi, PxVec3(0.0f, 1.0f, 0.0f));
+	}
+
+	const PxVec3 rotationAxis = cylinderAxis.cross(wheelAxis).getNormalized();
+	return PxQuat(PxAcos(dot), rotationAxis);
+}
+
+// Builds the chassis shape and one shape per wheel, replacing PxVehiclePhysXActorCreate's
+// createShapes so wheel geometry and shape flags can be chosen per wheel.
+void createShapes
+(const PxVehicleFrame& vehicleFrame,
+ const PxVehiclePhysXRigidActorShapeParams& rigidActorShapeParams,
+ const PxVehicleAxleDescription& axleDescription, const PxVehicleWheelParams* wheelParams,
+ const WheelShapeConfig* wheelShapeConfigs, PxMaterial& wheelMaterial,
+ PxTransform* wheelShapeLocalPoses,
+ PxRigidBody* rd, PxPhysics& physics, const PxCookingParams& params,
+ PxVehiclePhysXActor& vehiclePhysXActor)
+{
+	//Create a shape for the vehicle body.
+	{
+		PxShape* shape = physics.createShape(rigidActorShapeParams.geometry, rigidActorShapeParams.material, true);
+		shape->setLocalPose(rigidActorShapeParams.localPose);
+		shape->setFlags(rigidActorShapeParams.flags);
+		shape->setSimulationFilterData(rigidActorShapeParams.simulationFilterData);
+		shape->setQueryFilterData(rigidActorShapeParams.queryFilterData);
+		rd->attachShape(*shape);
+		shape->release();
+	}
+
+	//Create shapes for wheels.
+	for (PxU32 i = 0; i < axleDescription.nbWheels; i++)
+	{
+		const PxU32 wheelId = axleDescription.wheelIdsInAxleOrder[i];
+		const WheelShapeConfig& config = wheelShapeConfigs[wheelId];
+
+		PxShapeFlags flags = PxShapeFlags(0);
+		if (config.desc.simulationShape)
+			flags |= PxShapeFlag::eSIMULATION_SHAPE;
+		if (config.desc.sceneQueryShape)
+			flags |= PxShapeFlag::eSCENE_QUERY_SHAPE;
+
+		const PxFilterData simFilterData(
+			config.desc.simFilterData[0], config.desc.simFilterData[1],
+			config.desc.simFilterData[2], config.desc.simFilterData[3]);
+		const PxFilterData queryFilterData(
+			config.desc.queryFilterData[0], config.desc.queryFilterData[1],
+			config.desc.queryFilterData[2], config.desc.queryFilterData[3]);
+
+		PxShape* wheelShape = NULL;
+		PxConvexMesh* convexMesh = NULL;
+
+		switch (config.desc.geometryMode)
+		{
+		case PxwVehicleWheelGeometryMode::eCYLINDER:
+		{
+			// PxConvexCore::Cylinder takes a full height, and the geometry is the core swept
+			// by the margin, so the core is shrunk by the margin to keep the wheel the size
+			// the wheel params asked for.
+			const PxReal margin = PxMax(0.0f, config.desc.margin);
+			const PxReal height = PxMax(0.001f, 2.0f * wheelParams[wheelId].halfWidth - 2.0f * margin);
+			const PxReal radius = PxMax(0.001f, wheelParams[wheelId].radius - margin);
+			const PxConvexCoreGeometry cylinder(PxConvexCore::Cylinder(height, radius), margin);
+			wheelShape = physics.createShape(cylinder, wheelMaterial, true);
+
+			// Turn the cylinder's local +X onto the wheel's rotation axis. Composed into the
+			// pose the vehicle multiplies its per-step wheel pose by, because the shape's own
+			// local pose is overwritten every step.
+			wheelShapeLocalPoses[wheelId] = PxTransform(PxVec3(0.0f), CylinderAxisRotation(vehicleFrame));
+			break;
+		}
+		case PxwVehicleWheelGeometryMode::eGEOMETRY:
+		{
+			if (config.geometry == NULL)
+			{
+				PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__,
+					"Wheel shape geometry mode is eGEOMETRY but no geometry was supplied; cooking the default prism\n");
+			}
+			else
+			{
+				wheelShape = physics.createShape(*config.geometry, wheelMaterial, true);
+			}
+			break;
+		}
+		default:
+			break;
+		}
+
+		if (wheelShape == NULL)
+		{
+			convexMesh = CookWheelPrism(vehicleFrame, wheelParams[wheelId], physics, params);
+			PxConvexMeshGeometry convexMeshGeom(convexMesh);
+			wheelShape = physics.createShape(convexMeshGeom, wheelMaterial, true);
+		}
+
+		wheelShape->setFlags(flags);
+		wheelShape->setSimulationFilterData(simFilterData);
+		wheelShape->setQueryFilterData(queryFilterData);
+
+		rd->attachShape(*wheelShape);
+		wheelShape->release();
+		if (convexMesh != NULL)
+			convexMesh->release();
+
+		vehiclePhysXActor.wheelShapes[wheelId] = wheelShape;
+	}
+}
+
+} // anonymous namespace
+
 void PhysXIntegrationState::create
-(const BaseVehicleParams& baseParams, const PhysXIntegrationParams& physxParams,
+(const BaseVehicleParams& baseParams, PhysXIntegrationParams& physxParams,
  PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial,
- const PxGeometry* chassisGeometry)
+ const PxGeometry* chassisGeometry, const WheelShapeConfig* wheelShapeConfigs)
 {
 	setToDefault();
 
@@ -94,16 +271,30 @@ void PhysXIntegrationState::create
 		// other dynamic/static rigid bodies. Zero filter data collides with everything under
 		// the scene's default filter shader. Suspension queries use PxQueryFlag::eSTATIC only
 		// (see setPhysXIntegrationParams), so a dynamic chassis is never hit by any wheel raycast.
-		// Wheels stay non-simulation (raycast driven), so they keep PxShapeFlags(0).
 		const PxVehiclePhysXRigidActorShapeParams physxActorShapeParams(chassisGeom, physxParams.physxActorBoxShapeLocalPose, defaultMaterial, PxShapeFlags(PxShapeFlag::eSIMULATION_SHAPE), PxFilterData(), PxFilterData());
-		const PxVehiclePhysXWheelParams physxWheelParams(baseParams.axleDescription, baseParams.wheelParams);
-		const PxVehiclePhysXWheelShapeParams physxWheelShapeParams(defaultMaterial, PxShapeFlags(0), PxFilterData(), PxFilterData());
 
-		PxVehiclePhysXActorCreate(
-			baseParams.frame,
-			physxActorParams, physxParams.physxActorCMassLocalPose, physxActorShapeParams,
-			physxWheelParams, physxWheelShapeParams,
-			physics, params,
+		// Wheels default to the raycast-driven, non-colliding shape Vehicle2 expects.
+		WheelShapeConfig defaultConfigs[PxVehicleLimits::eMAX_NB_WHEELS];
+		if (wheelShapeConfigs == NULL)
+		{
+			for (PxU32 i = 0; i < PxVehicleLimits::eMAX_NB_WHEELS; ++i)
+				defaultConfigs[i].setToDefault();
+			wheelShapeConfigs = defaultConfigs;
+		}
+
+		// The actor is built here rather than by PxVehiclePhysXActorCreate so createShapes can
+		// give each wheel its own geometry; PxVehiclePhysXActorConfigure is the same call that
+		// helper makes, so the actor itself is configured identically.
+		PxRigidDynamic* rd = physics.createRigidDynamic(PxTransform(PxIdentity));
+		physxActor.rigidBody = rd;
+		PxVehiclePhysXActorConfigure(physxActorParams, physxParams.physxActorCMassLocalPose, *rd);
+
+		createShapes(
+			baseParams.frame, physxActorShapeParams,
+			baseParams.axleDescription, baseParams.wheelParams,
+			wheelShapeConfigs, defaultMaterial,
+			physxParams.physxWheelShapeLocalPoses,
+			rd, physics, params,
 			physxActor);
 	}
 
@@ -138,7 +329,8 @@ void setPhysXIntegrationParams(const PxVehicleAxleDescription& axleDescription,
 }
 
 
-bool PhysXActorVehicle::initialize(PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial, const PxGeometry* chassisGeometry)
+bool PhysXActorVehicle::initialize(PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial,
+	const PxGeometry* chassisGeometry, const WheelShapeConfig* wheelShapeConfigs)
 {
 	mCommandState.setToDefault();
 
@@ -148,7 +340,7 @@ bool PhysXActorVehicle::initialize(PxPhysics& physics, const PxCookingParams& pa
 	if (!mPhysXParams.isValid(mBaseParams.axleDescription))
 		return false;
 
-	mPhysXState.create(mBaseParams, mPhysXParams, physics, params, defaultMaterial, chassisGeometry);
+	mPhysXState.create(mBaseParams, mPhysXParams, physics, params, defaultMaterial, chassisGeometry, wheelShapeConfigs);
 
 	return true;
 }

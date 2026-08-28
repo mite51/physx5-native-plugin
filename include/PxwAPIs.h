@@ -397,6 +397,12 @@ extern "C" {
 
     PHYSX_WRAPPER_API PxGeometry* CreatePxGeometry(const PxGeometryType::Enum type, const int numShapeParams, const float* shapeParams, void* shapeRef);
 
+    // Convex core geometry: a pre-authored GJK support core swept by a margin. coreType is a
+    // PxConvexCore::Type; coreParams holds the floats that core needs (point 0, segment 1,
+    // box 3, ellipsoid 3, cylinder 2, cone 2). Cylinder, cone and segment cores run along
+    // local +X, as PxCapsuleGeometry does. Released through DeletePxGeometry like any other.
+    PHYSX_WRAPPER_API PxGeometry* CreateConvexCoreGeometry(const int coreType, const int numCoreParams, const float* coreParams, const float margin);
+
     PHYSX_WRAPPER_API void DeletePxGeometry(PxGeometry* geometry);
 
     PHYSX_WRAPPER_API PxMaterial* CreatePxMaterial(const float staticFriction, const float dynamicFriction, const float restitution);
@@ -442,6 +448,33 @@ extern "C" {
     PHYSX_WRAPPER_API void GetShapeLocalPose(PxShape* shape, PxwTransformData* destPose);
     PHYSX_WRAPPER_API void SetShapeLocalPose(PxShape* shape, PxwTransformData* pose);
 
+    // Collision filtering.
+    //
+    // Scenes here run PxDefaultSimulationFilterShader (or the notification-adding variant,
+    // which delegates to it), so a shape's simulation filter data word0 is read as a collision
+    // *group index* in 0..31, not as a bitmask, and the pair is suppressed when the group table
+    // says those two groups do not collide. word1..word3 feed the shader's group-mask filtering,
+    // which is left in its default pass-everything configuration.
+    //
+    // The table starts out all-collide, which is why shapes with zero filter data collide with
+    // everything today. It lives in PhysXExtensions as process-global state, so it is shared by
+    // every scene in the process and must be configured identically on every peer of a
+    // deterministic session; PxwWorldHashConstruction folds it in so a disagreement is caught
+    // at the construction-hash exchange rather than showing up later as a desync.
+    PHYSX_WRAPPER_API void SetShapeSimulationFilterData(PxShape* shape, PxU32 word0, PxU32 word1, PxU32 word2, PxU32 word3);
+    PHYSX_WRAPPER_API void SetShapeQueryFilterData(PxShape* shape, PxU32 word0, PxU32 word1, PxU32 word2, PxU32 word3);
+    PHYSX_WRAPPER_API void GetShapeSimulationFilterData(PxShape* shape, PxU32* destWords);
+
+    // group0 and group1 are collision group indices in 0..31. Calls out of range are ignored.
+    PHYSX_WRAPPER_API void SetGroupCollisionFlag(PxU32 group0, PxU32 group1, bool enable);
+    PHYSX_WRAPPER_API bool GetGroupCollisionFlag(PxU32 group0, PxU32 group1);
+
+    // Restores the all-collide default for every group pair. Worth calling at world teardown:
+    // the table outlives any single scene, so a session that changed it would otherwise leak
+    // that state into whatever runs next in the same process, including the next Play session
+    // in the editor.
+    PHYSX_WRAPPER_API void ResetGroupCollisionFlags();
+
     // Add this new function declaration
     PHYSX_WRAPPER_API const char* GetPhysxErrors();
 
@@ -486,6 +519,12 @@ extern "C" {
     PHYSX_WRAPPER_API void SetVehicleAxleDescription(PxwVehicle* vehicle, int nbAxles, int* nbWheelsPerAxle, int* wheelIdsInAxleOrder);
 
     PHYSX_WRAPPER_API void SetVehicleWheelParams(PxwVehicle* vehicle, int wheelId, PxwVehicleWheelDesc* desc);
+
+    // Configures a wheel's collision shape. Must be called before FinalizeVehicle, which is
+    // where the actor and its shapes are built. geometry is only read when desc->geometryMode is
+    // eGEOMETRY, and must outlive the vehicle. See PxwVehicleWheelShapeDesc for why enabling
+    // simulationShape needs a collision group that excludes the drivable surface.
+    PHYSX_WRAPPER_API void SetVehicleWheelShapeParams(PxwVehicle* vehicle, int wheelId, PxwVehicleWheelShapeDesc* desc, PxGeometry* geometry);
 
     PHYSX_WRAPPER_API void SetVehicleSuspensionParams(PxwVehicle* vehicle, int wheelId, PxwVehicleSuspensionDesc* desc);
 

@@ -389,6 +389,11 @@ PxGeometry* CreatePxGeometry(const PxGeometryType::Enum type, const int numShape
 	return gPhysXWrapper.CreatePxGeometry(type, numShapeParams, shapeParams, shapeRef);
 }
 
+PxGeometry* CreateConvexCoreGeometry(const int coreType, const int numCoreParams, const float* coreParams, const float margin)
+{
+	return gPhysXWrapper.CreateConvexCoreGeometry(static_cast<PxConvexCore::Type>(coreType), numCoreParams, coreParams, margin);
+}
+
 void DeletePxGeometry(PxGeometry* geometry)
 {
 	delete geometry;
@@ -951,6 +956,56 @@ void SetShapeLocalPose(PxShape* shape, PxwTransformData* pose)
 	shape->setLocalPose(pose->ToPxTransform());
 }
 
+void SetShapeSimulationFilterData(PxShape* shape, PxU32 word0, PxU32 word1, PxU32 word2, PxU32 word3)
+{
+	if (shape == NULL)
+		return;
+	shape->setSimulationFilterData(PxFilterData(word0, word1, word2, word3));
+}
+
+void SetShapeQueryFilterData(PxShape* shape, PxU32 word0, PxU32 word1, PxU32 word2, PxU32 word3)
+{
+	if (shape == NULL)
+		return;
+	shape->setQueryFilterData(PxFilterData(word0, word1, word2, word3));
+}
+
+void GetShapeSimulationFilterData(PxShape* shape, PxU32* destWords)
+{
+	if (shape == NULL || destWords == NULL)
+		return;
+	const PxFilterData data = shape->getSimulationFilterData();
+	destWords[0] = data.word0;
+	destWords[1] = data.word1;
+	destWords[2] = data.word2;
+	destWords[3] = data.word3;
+}
+
+void SetGroupCollisionFlag(PxU32 group0, PxU32 group1, bool enable)
+{
+	if (group0 >= pxw::kPxwNbCollisionGroups || group1 >= pxw::kPxwNbCollisionGroups)
+		return;
+	PxSetGroupCollisionFlag(static_cast<PxU16>(group0), static_cast<PxU16>(group1), enable);
+}
+
+bool GetGroupCollisionFlag(PxU32 group0, PxU32 group1)
+{
+	if (group0 >= pxw::kPxwNbCollisionGroups || group1 >= pxw::kPxwNbCollisionGroups)
+		return true;
+	return PxGetGroupCollisionFlag(static_cast<PxU16>(group0), static_cast<PxU16>(group1));
+}
+
+void ResetGroupCollisionFlags()
+{
+	for (PxU32 i = 0; i < pxw::kPxwNbCollisionGroups; ++i)
+	{
+		for (PxU32 j = 0; j < pxw::kPxwNbCollisionGroups; ++j)
+		{
+			PxSetGroupCollisionFlag(static_cast<PxU16>(i), static_cast<PxU16>(j), true);
+		}
+	}
+}
+
 // Add near the top with other basic PhysX functions
 PHYSX_WRAPPER_API const char* GetPhysxErrors() {
 	// Get the errors and store in a static buffer
@@ -1139,6 +1194,12 @@ void SetVehicleWheelParams(PxwVehicle* vehicle, int wheelId, PxwVehicleWheelDesc
 {
     if (vehicle && desc)
         vehicle->SetWheel(wheelId, *desc);
+}
+
+void SetVehicleWheelShapeParams(PxwVehicle* vehicle, int wheelId, PxwVehicleWheelShapeDesc* desc, PxGeometry* geometry)
+{
+    if (vehicle && desc)
+        vehicle->SetWheelShape(wheelId, *desc, geometry);
 }
 
 void SetVehicleSuspensionParams(PxwVehicle* vehicle, int wheelId, PxwVehicleSuspensionDesc* desc)

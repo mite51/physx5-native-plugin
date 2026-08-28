@@ -41,11 +41,12 @@ const PxVehicleFrame& srcFrame, const PxVehicleFrame& trgFrame, const PxVehicleS
 }
 
 
-bool DirectDriveVehicle::initialize(PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial, bool addPhysXBeginEndComponents, const PxGeometry* chassisGeometry)
+bool DirectDriveVehicle::initialize(PxPhysics& physics, const PxCookingParams& params, PxMaterial& defaultMaterial, bool addPhysXBeginEndComponents,
+	const PxGeometry* chassisGeometry, const WheelShapeConfig* wheelShapeConfigs)
 {
 	mTransmissionCommandState.setToDefault();
 
-	if (!PhysXActorVehicle::initialize(physics, params, defaultMaterial, chassisGeometry))
+	if (!PhysXActorVehicle::initialize(physics, params, defaultMaterial, chassisGeometry, wheelShapeConfigs))
 		return false;
 
 	if (!mDirectDriveParams.isValid(mBaseParams.axleDescription))
