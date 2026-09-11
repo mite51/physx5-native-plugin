@@ -44,6 +44,7 @@ namespace pxw
 		void SetGearbox(const PxwVehicleGearboxDesc& d);
 		void SetAutobox(const PxwVehicleAutoboxDesc& d);
 		void SetClutch(const PxwVehicleClutchDesc& d);
+		// Also supports between-step updates after Finalize; refreshes bound per-wheel tables.
 		void SetTireFriction(PxMaterial** materials, float* frictions, int count, float defaultFriction);
 		void SetRoadQueryType(PxwVehicleRoadQueryType::Enum type);
 		void SetUseDirectWheelControl(bool use);
@@ -65,15 +66,27 @@ namespace pxw
 
 		// --- Control (call after Finalize) ---
 		void SetCommands(float brake0, float brake1, float throttle, float steer);
+		// Reset integrators and commands after teleporting, without replacing the registered actor.
+		// Does not change chassis pose/velocity or vehicle parameters. Call between simulation steps.
+		void ResetState();
 		void SetTransmissionCommand(int targetGear, float clutch);
 		void SetTankThrusts(float thrust0, float thrust1);
 		void SetWheelControl(int wheelId, float driveTorque, float brakeTorque, float steerAngle);
+
+		// Scene-wide substep policy, pushed in from the owning scene before each Step. Below
+		// thresholdSpeed (forward speed, m/s) the suspension/tire/wheel substep group runs
+		// lowSubsteps times; at or above it, highSubsteps times.
+		void SetSubstepPolicy(PxU8 lowSubsteps, PxU8 highSubsteps, PxReal thresholdSpeed);
 
 		// --- Step + readback ---
 		void Step(float dt, const PxVehiclePhysXSimulationContext& context);
 		void GetRigidBodyPose(PxwTransformData* dest);
 		void GetWheelStates(PxwVehicleWheelState* dest, int length);
 		void GetDriveState(PxwVehicleDriveState* dest);
+		// Diagnostic readback for parity traces. GetWheelTelemetry fills up to length entries
+		// in axle order; GetBodyTelemetry fills one whole-body record.
+		void GetWheelTelemetry(PxwVehicleWheelTelemetry* dest, int length);
+		void GetBodyTelemetry(PxwVehicleBodyTelemetry* dest);
 		PxRigidBody* GetActor();
 		bool IsWheelShape(const PxShape* shape) const;
 
@@ -131,6 +144,11 @@ namespace pxw
 		bool mUseDirectWheelControl;
 		bool mFinalized;
 		bool mInScene;
+
+		// Scene-wide substep policy, defaulting to the historical fixed count of 3.
+		PxU8 mLowSubstepCount;
+		PxU8 mHighSubstepCount;
+		PxReal mSubstepThresholdSpeed;
 	};
 
 	// Bytes a rollback snapshot occupies for a vehicle of this drive mode and wheel

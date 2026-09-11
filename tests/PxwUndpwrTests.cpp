@@ -31,6 +31,7 @@
 #include "PxwUndpwr.h"
 #include "PxwAPIs.h"
 #include "VehicleHelper.h"
+#include "VehicleModule.h"
 
 #include <cstdio>
 #include <cstring>
@@ -3658,12 +3659,13 @@ namespace
 	// A four-wheeled vehicle built directly on the pxw classes so the test can set the
 	// per-wheel parameters without going through the descriptor-heavy C API.
 	PxwVehicle* BuildTestVehicle(PxScene* scene, PxPhysics* physics, PxMaterial* material, bool engineDrive,
-		const PxwVehicleWheelShapeDesc* wheelShape = NULL, const PxwVehicleFrameDesc* frame = NULL)
+		const PxwVehicleWheelShapeDesc* wheelShape = NULL, const PxwVehicleFrameDesc* frame = NULL,
+		const PxTransform* cmassLocalPose = NULL)
 	{
 		PxwVehicleChassisDesc chassis;
 		chassis.mass = 1500.0f;
 		chassis.moi = PxVec3(3625.0f, 3625.0f, 3625.0f);
-		chassis.cmassLocalPose = PxwTransformData(PxTransform(PxIdentity));
+		chassis.cmassLocalPose = PxwTransformData(cmassLocalPose ? *cmassLocalPose : PxTransform(PxIdentity));
 		chassis.boxHalfExtents = PxVec3(0.9f, 0.35f, 2.2f);
 		chassis.shapeLocalPose = PxwTransformData(PxTransform(PxIdentity));
 
@@ -3782,7 +3784,8 @@ namespace
 		VehicleWorld() : world(NULL), vehicle(NULL), engine(false), throttle(0.0f) {}
 
 		void Build(bool engineDrive, float throttleCmd, const PxwVehicleWheelShapeDesc* wheelShape = NULL,
-			const PxwVehicleFrameDesc* frame = NULL)
+			const PxwVehicleFrameDesc* frame = NULL, const PxTransform* cmassLocalPose = NULL,
+			const PxwVehicleSceneContextDesc* sceneContext = NULL)
 		{
 			engine = engineDrive;
 			throttle = throttleCmd;
@@ -3792,6 +3795,9 @@ namespace
 			PxwWorldSetSleepParams(world, 0.0f, 0.0f, 0u);
 
 			PxScene* scene = PxwWorldGetScene(world);
+			// The scene-wide vehicle context must be set before the first vehicle is added.
+			if (sceneContext != NULL)
+				SetVehicleSceneContext(scene, const_cast<PxwVehicleSceneContextDesc*>(sceneContext));
 			PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
 			PxMaterial* material = physics->createMaterial(1.0f, 1.0f, 0.1f);
 
@@ -3804,7 +3810,7 @@ namespace
 				PxwWorldRegister(world, 1u, ground, PxwHandleKind::eRIGID_STATIC);
 			}
 
-			vehicle = BuildTestVehicle(scene, physics, material, engineDrive, wheelShape, frame);
+			vehicle = BuildTestVehicle(scene, physics, material, engineDrive, wheelShape, frame, cmassLocalPose);
 			PxwWorldRegister(world, 10u, vehicle, PxwHandleKind::eVEHICLE);
 			PxwWorldCommitPending(world);
 
@@ -4165,6 +4171,59 @@ namespace
 	// rollback that replays the same inputs would still nudge the state. Same shape as
 	// the rigid and articulation versions: the first capture may differ, the settled
 	// one must not.
+	void TestVehicleLiveTireFriction(bool engine)
+	{
+		std::printf("TestVehicleLiveTireFriction [%s, %s]\n", DriveName(engine), SolverName());
+		VehicleWorld w; w.Build(engine, 0.0f);
+		// Put the suspension below the chassis so it supports this small test rig.
+		for (int i = 0; i < 4; ++i)
+		{
+			PxwVehicleSuspensionDesc s{};
+			s.suspensionAttachment = PxwTransformData(PxTransform(PxVec3(i % 2 ? -0.8f : 0.8f, -0.3f, i < 2 ? 1.4f : -1.4f)));
+			s.wheelAttachment = PxwTransformData(PxTransform(PxIdentity));
+			s.travelDir = PxVec3(0, -1, 0); s.travelDist = .25f;
+			s.stiffness = 35000; s.damping = 4500; s.sprungMass = 375;
+			w.vehicle->SetSuspension(i, s);
+		}
+		for (int tick = 0; tick < 120; ++tick) { w.ApplyInput(tick); PxwWorldStep(w.world, kDt); }
+		PxwVehicleWheelTelemetry before[4]{}; w.vehicle->GetWheelTelemetry(before, 4);
+		w.vehicle->SetTireFriction(NULL, NULL, 0, 3.0f);
+		for (int tick = 0; tick < 3; ++tick) { w.ApplyInput(tick); PxwWorldStep(w.world, kDt); }
+		PxwVehicleWheelTelemetry after[4]{}; w.vehicle->GetWheelTelemetry(after, 4);
+		Check(before[0].tireLoad > 1 && after[0].tireLoad > 1 && after[0].friction > before[0].friction * 2.0f,
+			"changing default friction on a finalized vehicle reaches native tire telemetry");
+		w.Destroy();
+	}
+
+	void TestVehicleResetState(bool engine)
+	{
+		std::printf("TestVehicleResetState [%s, %s]\n", DriveName(engine), SolverName());
+		VehicleWorld w;
+		w.Build(engine, 1.0f);
+		std::vector<PxU8> initial(w.vehicle->SnapshotSize());
+		w.vehicle->CaptureSnapshot(initial.data(), static_cast<PxU32>(initial.size()));
+		for (int tick = 0; tick < 60; ++tick) { w.ApplyInput(tick); PxwWorldStep(w.world, kDt); }
+		const std::vector<PxU8> beforeReset = w.Capture();
+		PxRigidBody* actor = w.vehicle->GetActor();
+		const PxTransform pose = actor->getGlobalPose();
+		const PxVec3 velocity = actor->getLinearVelocity();
+		const PxU64 construction = PxwWorldHashConstruction(w.world);
+		ResetVehicleState(w.vehicle);
+		std::vector<PxU8> reset(w.vehicle->SnapshotSize());
+		w.vehicle->CaptureSnapshot(reset.data(), static_cast<PxU32>(reset.size()));
+		Check(reset == initial, "vehicle reset clears wheel, suspension, sticky and drivetrain integrators");
+		Check(actor == w.vehicle->GetActor() && actor->getGlobalPose().p == pose.p &&
+			actor->getGlobalPose().q == pose.q && actor->getLinearVelocity() == velocity,
+			"vehicle integrator reset preserves registered chassis and body state");
+		Check(PxwWorldHashConstruction(w.world) == construction, "vehicle reset preserves construction");
+		w.Restore(beforeReset);
+		ResetVehicleState(w.vehicle);
+		std::vector<PxU8> replay(w.vehicle->SnapshotSize());
+		w.vehicle->CaptureSnapshot(replay.data(), static_cast<PxU32>(replay.size()));
+		Check(replay == reset, "vehicle reset replays from a restored world snapshot");
+		w.Destroy();
+	}
+
 	void TestVehicleRestoreRoundTrip(bool engine)
 	{
 		std::printf("TestVehicleRestoreRoundTrip [%s, %s]\n", DriveName(engine), SolverName());
@@ -4314,10 +4373,236 @@ namespace
 		peerB.Destroy();
 	}
 
+	// The center-of-mass contract: Unity authors suspension attachments in actor-local
+	// (rigid-body origin) coordinates, the wrapper converts them into the COM frame Vehicle2
+	// expects, and wheel readback converts the resulting pose back to actor-local. Moving the
+	// COM must therefore leave the actor-local resting wheel positions unchanged, and every
+	// wheel must still settle one radius above the road in world space. A build that skipped
+	// either conversion would shift the reported wheel poses by the COM offset and fail here.
+	void TestVehicleComActorLocalRoundTrip(bool engine)
+	{
+		std::printf("TestVehicleComActorLocalRoundTrip [%s, %s]\n", DriveName(engine), SolverName());
+		const std::string suffix = " [" + std::string(DriveName(engine)) + ", " + SolverName() + "]";
+
+		// The authored actor-local suspension attachment positions from BuildTestVehicle.
+		const float attachX = 0.8f;
+		const float attachZ = 1.4f;
+
+		// Settle a vehicle with a given COM and return the world-space centres of its four
+		// wheels (in axle order) plus a pass/fail on the actor-local X/Z invariance.
+		struct Result { PxVec3 world[4]; bool actorLocalOk; };
+		auto settle = [&](const PxTransform& cmass) -> Result {
+			VehicleWorld w;
+			w.Build(engine, 0.0f, NULL, NULL, &cmass);
+			for (int tick = 0; tick < 160; ++tick)
+			{
+				w.vehicle->SetCommands(0.0f, 0.0f, 0.0f, 0.0f);
+				PxwWorldStep(w.world, kDt);
+			}
+			PxwTransformData bodyPose;
+			w.vehicle->GetRigidBodyPose(&bodyPose);
+			const PxTransform actorToWorld = bodyPose.ToPxTransform();
+			PxwVehicleWheelState wheels[4];
+			w.vehicle->GetWheelStates(wheels, 4);
+			Result r;
+			r.actorLocalOk = true;
+			for (int i = 0; i < 4; ++i)
+			{
+				const PxVec3 p = wheels[i].localPose.ToPxTransform().p;
+				if (PxAbs(PxAbs(p.x) - attachX) > 0.02f || PxAbs(PxAbs(p.z) - attachZ) > 0.02f)
+					r.actorLocalOk = false;
+				r.world[i] = actorToWorld.transform(p);
+			}
+			w.Destroy();
+			return r;
+		};
+
+		// Identity is the baseline. The other cases keep the vehicle statically symmetric on
+		// flat ground (a vertical COM shift and a yaw rotation of an isotropic inertia), so a
+		// correct actor-local -> COM -> actor-local round trip must leave every wheel at the
+		// same world position. Skip a longitudinal/lateral COM shift here because that legitimately
+		// redistributes static load and moves the wheels, which would not be a conversion bug.
+		struct Case { const char* name; PxTransform cmass; };
+		Case cases[3] = {
+			{ "identity COM", PxTransform(PxIdentity) },
+			{ "vertical COM shift", PxTransform(PxVec3(0.0f, 0.5f, 0.0f)) },
+			{ "yaw-rotated COM", PxTransform(PxVec3(0.0f, 0.4f, 0.0f), PxQuat(0.15f, PxVec3(0.0f, 1.0f, 0.0f))) },
+		};
+
+		const Result baseline = settle(cases[0].cmass);
+		Check(baseline.actorLocalOk,
+			std::string("actor-local wheel positions match the authored attachment (identity COM)") + suffix);
+
+		for (int c = 1; c < 3; ++c)
+		{
+			const Result r = settle(cases[c].cmass);
+			bool actorLocalOk = r.actorLocalOk;
+			bool worldMatches = true;
+			for (int i = 0; i < 4; ++i)
+			{
+				if ((r.world[i] - baseline.world[i]).magnitude() > 0.02f)
+					worldMatches = false;
+			}
+			Check(actorLocalOk,
+				std::string("actor-local wheel positions are COM-invariant (") + cases[c].name + ")" + suffix);
+			Check(worldMatches,
+				std::string("world-space wheel positions match the identity build (") + cases[c].name + ")" + suffix);
+		}
+	}
+
+	// The scene owns one explicit vehicle context: PhysX actor update mode, tire slip
+	// denominators and the substep policy, shared by every vehicle in the scene and frozen once
+	// the first vehicle is registered. This is the canonical kart profile: velocity update mode,
+	// 0.1 / 4 / 1 slip denominators and 3 / 3 substeps at a 5 m/s threshold.
+	void TestVehicleSceneContextOwnership()
+	{
+		std::printf("TestVehicleSceneContextOwnership [%s]\n", SolverName());
+		const std::string suffix = std::string(" [") + SolverName() + "]";
+
+		PxwSceneDesc desc = MakeDeterministicSceneDesc();
+		PxwWorld* world = PxwWorldCreate(&desc);
+		PxScene* scene = PxwWorldGetScene(world);
+
+		PxwVehicleSceneContextDesc ctx;
+		ctx.physxActorUpdateMode = 0; // eAPPLY_VELOCITY
+		ctx.minActiveLongSlipDenominator = 0.1f;
+		ctx.minPassiveLongSlipDenominator = 4.0f;
+		ctx.minLatSlipDenominator = 1.0f;
+		ctx.lowSubstepCount = 3;
+		ctx.highSubstepCount = 3;
+		ctx.substepThresholdSpeed = 5.0f;
+
+		// Before any vehicle: the context is accepted and reflected.
+		Check(SetVehicleSceneContext(scene, &ctx),
+			"scene context is accepted before the first vehicle" + suffix);
+
+		const PxVehiclePhysXSimulationContext* applied = VehicleGetSceneContext(scene);
+		Check(applied != NULL && applied->physxActorUpdateMode == PxVehiclePhysXActorUpdateMode::eAPPLY_VELOCITY,
+			"scene uses eAPPLY_VELOCITY update mode" + suffix);
+		Check(applied != NULL &&
+			PxAbs(applied->tireSlipParams.minActiveLongSlipDenominator - 0.1f) < 1e-6f &&
+			PxAbs(applied->tireSlipParams.minPassiveLongSlipDenominator - 4.0f) < 1e-6f &&
+			PxAbs(applied->tireSlipParams.minLatSlipDenominator - 1.0f) < 1e-6f,
+			"scene uses the 0.1 / 4 / 1 slip denominators" + suffix);
+
+		const PxwSceneSubstepPolicy policy = VehicleGetSceneSubstepPolicy(scene);
+		Check(policy.lowSubstepCount == 3 && policy.highSubstepCount == 3 &&
+			PxAbs(policy.thresholdSpeed - 5.0f) < 1e-6f,
+			"scene uses the 3 / 3 @ 5 m/s substep policy" + suffix);
+
+		// Add a vehicle, then a second attempt to reconfigure must be rejected.
+		PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+		PxMaterial* material = physics->createMaterial(1.0f, 1.0f, 0.1f);
+		PxwVehicle* vehicle = BuildTestVehicle(scene, physics, material, true);
+		PxwWorldRegister(world, 10u, vehicle, PxwHandleKind::eVEHICLE);
+		PxwWorldCommitPending(world);
+		material->release();
+
+		PxwVehicleSceneContextDesc other = ctx;
+		other.physxActorUpdateMode = 1; // eAPPLY_ACCELERATION
+		Check(!SetVehicleSceneContext(scene, &other),
+			"scene context is immutable once a vehicle is registered" + suffix);
+		const PxVehiclePhysXSimulationContext* still = VehicleGetSceneContext(scene);
+		Check(still != NULL && still->physxActorUpdateMode == PxVehiclePhysXActorUpdateMode::eAPPLY_VELOCITY,
+			"the frozen context still reports eAPPLY_VELOCITY" + suffix);
+
+		PxwWorldUnregister(world, 10u);
+		PxwWorldCommitPending(world);
+		delete vehicle;
+		PxwWorldDestroy(world);
+	}
+
+	// The canonical drivetrain: a rear-wheel-drive engine vehicle whose four-wheel torque and
+	// average-wheel-speed splits are 0, 0, .5, .5 (front wheels ids 0/1, rear 2/3). Under
+	// throttle the vehicle must accelerate forward and only the rear wheels must be driven, so
+	// the Standard Drive component path is exercised end to end.
+	void TestVehicleRwdEngineDriveDrives()
+	{
+		std::printf("TestVehicleRwdEngineDriveDrives [%s]\n", SolverName());
+		const std::string suffix = std::string(" [") + SolverName() + "]";
+
+		PxwSceneDesc desc = MakeDeterministicSceneDesc();
+		PxwWorld* world = PxwWorldCreate(&desc);
+		PxwWorldSetSleepParams(world, 0.0f, 0.0f, 0u);
+		PxScene* scene = PxwWorldGetScene(world);
+		PxPhysics* physics = GetGlobalPhysXWrapper().GetPhysics();
+		PxMaterial* material = physics->createMaterial(1.0f, 1.0f, 0.1f);
+
+		{
+			PxBoxGeometry groundGeom(60.0f, 1.0f, 60.0f);
+			PxShape* shape = physics->createShape(groundGeom, *material, true);
+			PxRigidStatic* ground = physics->createRigidStatic(PxTransform(PxVec3(0.0f, -1.0f, 0.0f)));
+			ground->attachShape(*shape);
+			shape->release();
+			PxwWorldRegister(world, 1u, ground, PxwHandleKind::eRIGID_STATIC);
+		}
+
+		// Build an engine vehicle, then override the differential to a rear-wheel-drive split:
+		// no torque to the front wheels (ids 0,1), an even split to the rear (ids 2,3).
+		PxwVehicle* vehicle = BuildTestVehicle(scene, physics, material, /*engineDrive*/ true);
+		material->release();
+
+		PxwVehicleDifferentialDesc diff;
+		std::memset(&diff, 0, sizeof(diff));
+		diff.type = PxwVehicleDifferentialType::eMULTIWHEEL;
+		diff.torqueRatios[0] = 0.0f; diff.torqueRatios[1] = 0.0f;
+		diff.torqueRatios[2] = 0.5f; diff.torqueRatios[3] = 0.5f;
+		diff.aveWheelSpeedRatios[0] = 0.0f; diff.aveWheelSpeedRatios[1] = 0.0f;
+		diff.aveWheelSpeedRatios[2] = 0.5f; diff.aveWheelSpeedRatios[3] = 0.5f;
+		vehicle->SetDifferential(diff);
+
+		PxwWorldRegister(world, 10u, vehicle, PxwHandleKind::eVEHICLE);
+		PxwWorldCommitPending(world);
+
+		// Settle briefly so the wheels are on the ground, then drive forward under full throttle
+		// in automatic transmission.
+		for (int tick = 0; tick < 30; ++tick)
+		{
+			vehicle->SetCommands(0.0f, 0.0f, 0.0f, 0.0f);
+			PxwWorldStep(world, kDt);
+		}
+		for (int tick = 0; tick < 240; ++tick)
+		{
+			vehicle->SetCommands(0.0f, 0.0f, 1.0f, 0.0f);
+			vehicle->SetTransmissionCommand(
+				static_cast<int>(PxVehicleEngineDriveTransmissionCommandState::eAUTOMATIC_GEAR), 0.0f);
+			PxwWorldStep(world, kDt);
+		}
+
+		PxwVehicleDriveState drive;
+		vehicle->GetDriveState(&drive);
+		PxwVehicleWheelTelemetry tele[4];
+		vehicle->GetWheelTelemetry(tele, 4);
+		std::printf("        longSpeed=%.3f engineRpm=%.1f gear=%d frontSpin=(%.2f,%.2f) rearSpin=(%.2f,%.2f)\n",
+			drive.longitudinalSpeed, drive.engineRotationSpeed, drive.currentGear,
+			tele[0].rotationSpeed, tele[1].rotationSpeed, tele[2].rotationSpeed, tele[3].rotationSpeed);
+
+		// The drivetrain has to actually turn over under throttle: the Standard Drive component
+		// path runs engine -> clutch -> gearbox -> differential -> wheels.
+		Check(drive.engineRotationSpeed > 1.0f,
+			"the engine spins up under throttle" + suffix);
+		// The 0,0,.5,.5 split is rear-wheel drive: the rear wheels (ids 2,3) receive drive torque
+		// and turn under power, the front wheels (ids 0,1) receive none. From rest with the body
+		// held by wheelspin this shows as rear wheels turning and front wheels essentially still.
+		Check(PxAbs(tele[2].rotationSpeed) > 1.0f && PxAbs(tele[3].rotationSpeed) > 1.0f,
+			"the driven rear wheels spin under throttle (telemetry readback)" + suffix);
+		Check(PxAbs(tele[0].rotationSpeed) < 1.0f && PxAbs(tele[1].rotationSpeed) < 1.0f,
+			"the undriven front wheels receive no drive torque under the RWD split" + suffix);
+
+		PxwWorldUnregister(world, 10u);
+		PxwWorldCommitPending(world);
+		delete vehicle;
+		PxwWorldDestroy(world);
+	}
+
 	void RunVehicleTests(PxSolverType::Enum solver)
 	{
 		gSolverType = solver;
 
+		TestVehicleComActorLocalRoundTrip(false);
+		TestVehicleComActorLocalRoundTrip(true);
+		TestVehicleSceneContextOwnership();
+		TestVehicleRwdEngineDriveDrives();
 		TestConvexCoreOnMeshIsReproducibleUnderRollback();
 		TestVehicleConstructionHashSurvivesWheelPoseUpdates(false);
 		TestVehicleConstructionHashSurvivesWheelPoseUpdates(true);
@@ -4331,6 +4616,10 @@ namespace
 		TestVehicleBaselineDeterminism(true);
 		TestVehicleRestoreRoundTrip(false);
 		TestVehicleRestoreRoundTrip(true);
+		TestVehicleResetState(false);
+		TestVehicleResetState(true);
+		TestVehicleLiveTireFriction(false);
+		TestVehicleLiveTireFriction(true);
 		TestVehicleFixedDepthRollback(false, 1.0f, "direct drive, driving");
 		TestVehicleFixedDepthRollback(false, 0.0f, "direct drive, at rest");
 		TestVehicleFixedDepthRollback(true, 1.0f, "engine drive, driving");

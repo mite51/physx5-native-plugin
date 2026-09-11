@@ -54,6 +54,9 @@ namespace pxw
 		, mUseDirectWheelControl(false)
 		, mFinalized(false)
 		, mInScene(false)
+		, mLowSubstepCount(3)
+		, mHighSubstepCount(3)
+		, mSubstepThresholdSpeed(5.0f)
 	{
 		if (driveMode == PxwVehicleDriveMode::eENGINE)
 			mEngine = new PxwEngineDriveVehicle();
@@ -244,7 +247,15 @@ namespace pxw
 	void PxwVehicle::SetSuspension(int wheelId, const PxwVehicleSuspensionDesc& d)
 	{
 		PxVehicleSuspensionParams& s = Base().suspensionParams[wheelId];
-		s.suspensionAttachment = d.suspensionAttachment.ToPxTransform();
+
+		// Unity authors the suspension attachment as an actor-local (rigid-body origin) pose,
+		// but Vehicle2 expresses suspension geometry in the center-of-mass frame. cmassLocalPose
+		// maps the actor origin onto the COM, so its inverse maps an actor-local pose into the
+		// COM frame the solver expects. Travel direction is a pure direction and, for the
+		// axis-aligned COM poses the plugin uses, needs no rotation; it is passed through.
+		const PxTransform cmass = mChassis.cmassLocalPose.ToPxTransform();
+		const PxTransform actorLocalAttachment = d.suspensionAttachment.ToPxTransform();
+		s.suspensionAttachment = cmass.getInverse() * actorLocalAttachment;
 		s.suspensionTravelDir = d.travelDir;
 		s.suspensionTravelDist = d.travelDist;
 		s.wheelAttachment = d.wheelAttachment.ToPxTransform();
@@ -448,6 +459,19 @@ namespace pxw
 			mf.friction = frictions[i];
 			mMaterialFrictions.push_back(mf);
 		}
+		if (mFinalized)
+		{
+			// Finalize binds these pointers once. A live table replacement can reallocate the
+			// vector, so refresh every wheel's pointer/count as well as the default coefficient.
+			const PxVehicleAxleDescription& axle = Base().axleDescription;
+			for (PxU32 i = 0; i < axle.nbWheels; ++i)
+			{
+				PxVehiclePhysXMaterialFrictionParams& p = PhysXParams().physxMaterialFrictionParams[axle.wheelIdsInAxleOrder[i]];
+				p.defaultFriction = mDefaultFriction;
+				p.materialFrictions = mMaterialFrictions.empty() ? NULL : mMaterialFrictions.data();
+				p.nbMaterialFrictions = static_cast<PxU32>(mMaterialFrictions.size());
+			}
+		}
 	}
 
 	void PxwVehicle::SetRoadQueryType(PxwVehicleRoadQueryType::Enum type)
@@ -475,12 +499,92 @@ namespace pxw
 				(static_cast<int>(i) < nbWheels && wheelResponseMultipliers) ? wheelResponseMultipliers[i] : 0.0f;
 	}
 
+	namespace
+	{
+		bool VehicleError(const char* msg)
+		{
+			PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, __FILE__, __LINE__, "%s", msg);
+			return false;
+		}
+
+		// Explicitly validates the data the caller must supply, rather than letting an
+		// unconfigured field silently fall through to a sample default. Returns false and logs
+		// a specific diagnostic on the first problem it finds.
+		bool ValidateBaseForFinalize(const BaseVehicleParams& base, const PxwVehicleChassisDesc& chassis,
+			bool engineDrive, PxwVehicleDifferentialType::Enum diffType,
+			const EngineDrivetrainParams* engineParams)
+		{
+			if (!chassis.cmassLocalPose.ToPxTransform().isSane())
+				return VehicleError("Vehicle chassis cmassLocalPose is not a sane transform");
+			if (!(chassis.mass > 0.0f) || !PxIsFinite(chassis.mass))
+				return VehicleError("Vehicle chassis mass must be finite and positive");
+			if (!chassis.moi.isFinite() || chassis.moi.x <= 0.0f || chassis.moi.y <= 0.0f || chassis.moi.z <= 0.0f)
+				return VehicleError("Vehicle chassis moment of inertia must be finite and positive on every axis");
+
+			const PxVehicleAxleDescription& axle = base.axleDescription;
+			if (axle.nbWheels == 0)
+				return VehicleError("Vehicle has no wheels; call SetVehicleAxleDescription before finalizing");
+
+			for (PxU32 i = 0; i < axle.nbWheels; ++i)
+			{
+				const PxU32 wheelId = axle.wheelIdsInAxleOrder[i];
+				const PxVehicleWheelParams& w = base.wheelParams[wheelId];
+				if (!(w.radius > 0.0f) || !(w.halfWidth > 0.0f) || !(w.mass > 0.0f) || !(w.moi > 0.0f))
+					return VehicleError("Vehicle wheel radius/halfWidth/mass/moi must all be finite and positive");
+
+				const PxVehicleSuspensionParams& s = base.suspensionParams[wheelId];
+				if (!s.suspensionAttachment.isSane() || !s.wheelAttachment.isSane())
+					return VehicleError("Vehicle suspension attachment poses are not sane transforms");
+				if (!(s.suspensionTravelDist > 0.0f))
+					return VehicleError("Vehicle suspension travel distance must be positive");
+				if (!s.suspensionTravelDir.isFinite() || s.suspensionTravelDir.magnitudeSquared() < 1e-8f)
+					return VehicleError("Vehicle suspension travel direction must be a finite non-zero vector");
+
+				const PxVehicleSuspensionForceParams& f = base.suspensionForceParams[wheelId];
+				if (!(f.stiffness > 0.0f) || !(f.sprungMass > 0.0f) || f.damping < 0.0f)
+					return VehicleError("Vehicle suspension stiffness/sprungMass must be positive and damping non-negative");
+
+				const PxVehicleTireForceParams& t = base.tireForceParams[wheelId];
+				if (!(t.restLoad > 0.0f))
+					return VehicleError("Vehicle tire rest load must be positive");
+			}
+
+			// Engine drive requires a normalized differential: the drive-torque split and the
+			// average-wheel-speed split each have to sum to one across the wheels, or torque is
+			// silently created or destroyed.
+			if (engineDrive && engineParams != NULL && diffType != PxwVehicleDifferentialType::eTANK)
+			{
+				float torqueSum = 0.0f;
+				float speedSum = 0.0f;
+				const PxVehicleMultiWheelDriveDifferentialParams& diff = engineParams->multiWheelDifferentialParams;
+				for (PxU32 i = 0; i < axle.nbWheels; ++i)
+				{
+					const PxU32 wheelId = axle.wheelIdsInAxleOrder[i];
+					torqueSum += diff.torqueRatios[wheelId];
+					speedSum += diff.aveWheelSpeedRatios[wheelId];
+				}
+				if (PxAbs(torqueSum - 1.0f) > 1e-3f)
+					return VehicleError("Vehicle differential torque ratios must sum to 1 across the wheels");
+				if (PxAbs(speedSum - 1.0f) > 1e-3f)
+					return VehicleError("Vehicle differential average-wheel-speed ratios must sum to 1 across the wheels");
+			}
+
+			return true;
+		}
+	}
+
 	bool PxwVehicle::Finalize(PxPhysics* physics, const PxCookingParams& cooking, PxMaterial* defaultMaterial)
 	{
 		if (mFinalized)
 			return true;
 
 		BaseVehicleParams& base = Base();
+
+		if (!ValidateBaseForFinalize(base, mChassis, mEngine != NULL, mDiffType,
+			mEngine ? &mEngine->mEngineDriveParams : NULL))
+		{
+			return false;
+		}
 
 		// Populate the PhysX integration params (road geometry query + per-wheel
 		// material friction + suspension limit constraints).
@@ -574,6 +678,25 @@ namespace pxw
 		cmd.steer = steer;
 	}
 
+	void PxwVehicle::ResetState()
+	{
+		if (!mFinalized) return;
+		PhysXActorVehicle* v = ActorVehicle();
+		v->mBaseState.setToDefault();
+		v->mCommandState.setToDefault();
+		if (mEngine)
+		{
+			mEngine->mEngineDriveState.setToDefault();
+			mEngine->mTransmissionCommandState.setToDefault();
+			mEngine->mTankDriveTransmissionCommandState.setToDefault();
+		}
+		if (mDirect)
+		{
+			mDirect->mDirectDriveState.setToDefault();
+			mDirect->mTransmissionCommandState.setToDefault();
+		}
+	}
+
 	void PxwVehicle::SetTransmissionCommand(int targetGear, float clutch)
 	{
 		if (mEngine)
@@ -610,11 +733,29 @@ namespace pxw
 		mDirect->mBaseState.steerCommandResponseStates[wheelId] = steerAngle;
 	}
 
+	void PxwVehicle::SetSubstepPolicy(PxU8 lowSubsteps, PxU8 highSubsteps, PxReal thresholdSpeed)
+	{
+		mLowSubstepCount = lowSubsteps > 0 ? lowSubsteps : 1;
+		mHighSubstepCount = highSubsteps > 0 ? highSubsteps : 1;
+		mSubstepThresholdSpeed = thresholdSpeed;
+	}
+
 	void PxwVehicle::Step(float dt, const PxVehiclePhysXSimulationContext& context)
 	{
 		if (!mFinalized)
 			return;
-		ActorVehicle()->step(dt, context);
+
+		// Pick the substep count for this step from the forward speed, exactly as the NVIDIA
+		// vehicle snippets do: more substeps at low speed for stability, fewer at speed for
+		// performance. With low == high this is a constant count and the branch is a no-op.
+		PhysXActorVehicle* v = ActorVehicle();
+		const PxVec3 lngAxis = v->mBaseParams.frame.getLngAxis();
+		const PxReal forwardSpeed = v->mBaseState.rigidBodyState.linearVelocity.dot(lngAxis);
+		const PxU8 nbSubsteps = (PxAbs(forwardSpeed) < mSubstepThresholdSpeed)
+			? mLowSubstepCount : mHighSubstepCount;
+		v->mComponentSequence.setSubsteps(v->mComponentSequenceSubstepGroupHandle, nbSubsteps);
+
+		v->step(dt, context);
 	}
 
 	void PxwVehicle::GetRigidBodyPose(PxwTransformData* dest)
@@ -629,9 +770,13 @@ namespace pxw
 		if (!dest)
 			return;
 		BaseVehicleState& state = ActorVehicle()->mBaseState;
+		// Vehicle2 reports wheel local poses in the COM frame. Compose with cmassLocalPose so
+		// Unity gets an actor-local (rigid-body origin) pose, the exact inverse of the
+		// conversion applied to the suspension attachment in SetSuspension.
+		const PxTransform cmass = mChassis.cmassLocalPose.ToPxTransform();
 		for (int i = 0; i < length && i < PxVehicleLimits::eMAX_NB_WHEELS; i++)
 		{
-			dest[i].localPose = PxwTransformData(state.wheelLocalPoses[i].localPose);
+			dest[i].localPose = PxwTransformData(cmass * state.wheelLocalPoses[i].localPose);
 			dest[i].rotationSpeed = state.wheelRigidBody1dStates[i].rotationSpeed;
 			dest[i].rotationAngle = state.wheelRigidBody1dStates[i].rotationAngle;
 			dest[i].jounce = state.suspensionStates[i].jounce;
@@ -665,6 +810,58 @@ namespace pxw
 			dest->targetGear = dest->currentGear;
 			dest->clutchSlip = 0.0f;
 		}
+	}
+
+	void PxwVehicle::GetWheelTelemetry(PxwVehicleWheelTelemetry* dest, int length)
+	{
+		if (!dest)
+			return;
+		const PhysXActorVehicle* v = ActorVehicleConst();
+		if (v == NULL)
+			return;
+
+		// Axle order so a trace lines up wheel-for-wheel with the snapshot and construction
+		// conventions rather than depending on raw wheel indexing.
+		const PxVehicleAxleDescription& axle = v->mBaseParams.axleDescription;
+		const BaseVehicleState& s = v->mBaseState;
+		const int count = (length < static_cast<int>(axle.nbWheels)) ? length : static_cast<int>(axle.nbWheels);
+		for (int i = 0; i < count; ++i)
+		{
+			const PxU32 wheelId = axle.wheelIdsInAxleOrder[i];
+			const PxVec3 lngDir = s.tireDirectionStates[wheelId].directions[PxVehicleTireDirectionModes::eLONGITUDINAL];
+			const PxVec3 latDir = s.tireDirectionStates[wheelId].directions[PxVehicleTireDirectionModes::eLATERAL];
+			const PxVec3 lngForce = s.tireForces[wheelId].forces[PxVehicleTireDirectionModes::eLONGITUDINAL];
+			const PxVec3 latForce = s.tireForces[wheelId].forces[PxVehicleTireDirectionModes::eLATERAL];
+
+			dest[i].jounce = s.suspensionStates[wheelId].jounce;
+			dest[i].suspensionForce = s.suspensionForces[wheelId].normalForce;
+			dest[i].tireLoad = s.tireGripStates[wheelId].load;
+			dest[i].friction = s.tireGripStates[wheelId].friction;
+			dest[i].longitudinalSlip = s.tireSlipStates[wheelId].slips[PxVehicleTireDirectionModes::eLONGITUDINAL];
+			dest[i].lateralSlip = s.tireSlipStates[wheelId].slips[PxVehicleTireDirectionModes::eLATERAL];
+			dest[i].longitudinalTireForce = lngForce.dot(lngDir);
+			dest[i].lateralTireForce = latForce.dot(latDir);
+			dest[i].rotationSpeed = s.wheelRigidBody1dStates[wheelId].rotationSpeed;
+			dest[i].steerAngle = s.steerCommandResponseStates[wheelId];
+		}
+	}
+
+	void PxwVehicle::GetBodyTelemetry(PxwVehicleBodyTelemetry* dest)
+	{
+		if (!dest)
+			return;
+		const PhysXActorVehicle* v = ActorVehicleConst();
+		if (v == NULL)
+			return;
+		const PxVehicleRigidBodyState& rb = v->mBaseState.rigidBodyState;
+		const PxVec3 lngAxis = v->mBaseParams.frame.getLngAxis();
+		const PxVec3 latAxis = v->mBaseParams.frame.getLatAxis();
+		const PxVec3 vrtAxis = v->mBaseParams.frame.getVrtAxis();
+		dest->linearVelocity = rb.linearVelocity;
+		dest->angularVelocity = rb.angularVelocity;
+		dest->longitudinalSpeed = rb.linearVelocity.dot(lngAxis);
+		dest->lateralSpeed = rb.linearVelocity.dot(latAxis);
+		dest->yawRate = rb.angularVelocity.dot(vrtAxis);
 	}
 
 	PxRigidBody* PxwVehicle::GetActor()

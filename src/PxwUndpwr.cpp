@@ -2841,6 +2841,33 @@ namespace
 			hash = FnvAccumulate(hash, &wheelIds[i], sizeof(wheelIds[i]));
 			hash = FnvAccumulate(hash, &pose, sizeof(pose));
 		}
+
+		// Fold in the scene-wide vehicle context the vehicle was finalized against. The actor
+		// update mode, slip denominators and substep policy all change how the vehicle
+		// integrates over time, so two peers configuring a scene differently must not hash
+		// equal. These are identical across peers that build the same managed PhysxScene, so a
+		// matched pair still agrees; a divergent configuration is named at construction time.
+		PxScene* scene = vehicle.Scene();
+		if (scene != NULL)
+		{
+			const PxwSceneSubstepPolicy substeps = VehicleGetSceneSubstepPolicy(scene);
+			hash = FnvAccumulate(hash, &substeps.lowSubstepCount, sizeof(substeps.lowSubstepCount));
+			hash = FnvAccumulate(hash, &substeps.highSubstepCount, sizeof(substeps.highSubstepCount));
+			hash = FnvAccumulate(hash, &substeps.thresholdSpeed, sizeof(substeps.thresholdSpeed));
+
+			const PxVehiclePhysXSimulationContext* context = VehicleGetSceneContext(scene);
+			if (context != NULL)
+			{
+				const PxU32 updateMode = static_cast<PxU32>(context->physxActorUpdateMode);
+				hash = FnvAccumulate(hash, &updateMode, sizeof(updateMode));
+				hash = FnvAccumulate(hash, &context->tireSlipParams.minActiveLongSlipDenominator,
+					sizeof(context->tireSlipParams.minActiveLongSlipDenominator));
+				hash = FnvAccumulate(hash, &context->tireSlipParams.minPassiveLongSlipDenominator,
+					sizeof(context->tireSlipParams.minPassiveLongSlipDenominator));
+				hash = FnvAccumulate(hash, &context->tireSlipParams.minLatSlipDenominator,
+					sizeof(context->tireSlipParams.minLatSlipDenominator));
+			}
+		}
 		return hash;
 	}
 

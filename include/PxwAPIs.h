@@ -504,6 +504,13 @@ extern "C" {
 
     // Vehicles (PhysX Vehicle2)
 
+    // Scene context. Configures the explicit, scene-wide vehicle simulation context (PhysX
+    // actor update mode, tire slip denominators, substep policy). Must be called before the
+    // first vehicle is added to the scene; the context is immutable afterwards. Returns true
+    // when applied. The managed PhysxScene supplies these values so every vehicle in a scene
+    // shares one context rather than the last-configured vehicle winning.
+    PHYSX_WRAPPER_API bool SetVehicleSceneContext(PxScene* scene, PxwVehicleSceneContextDesc* desc);
+
     // Lifecycle
     PHYSX_WRAPPER_API PxwVehicle* CreateVehicle(PxScene* scene, int driveMode, PxwVehicleChassisDesc* chassis, PxGeometry* chassisGeometry, PxMaterial* material);
 
@@ -561,6 +568,9 @@ extern "C" {
 
     // Control (call after FinalizeVehicle)
     PHYSX_WRAPPER_API void SetVehicleCommands(PxwVehicle* vehicle, float brake0, float brake1, float throttle, float steer);
+    // Reset wheel/suspension/drivetrain integrators and commands; retain the actor and parameters.
+    // Call between steps, normally alongside a chassis teleport.
+    PHYSX_WRAPPER_API void ResetVehicleState(PxwVehicle* vehicle);
 
     PHYSX_WRAPPER_API void SetVehicleTransmissionCommand(PxwVehicle* vehicle, int targetGear, float clutch);
 
@@ -574,6 +584,11 @@ extern "C" {
     PHYSX_WRAPPER_API void GetVehicleWheelStates(PxwVehicle* vehicle, PxwVehicleWheelState* destArray, int length);
 
     PHYSX_WRAPPER_API void GetVehicleDriveState(PxwVehicle* vehicle, PxwVehicleDriveState* dest);
+
+    // Diagnostic readback for parity traces (see PxwVehicleWheelTelemetry / PxwVehicleBodyTelemetry).
+    PHYSX_WRAPPER_API void GetVehicleWheelTelemetry(PxwVehicle* vehicle, PxwVehicleWheelTelemetry* destArray, int length);
+
+    PHYSX_WRAPPER_API void GetVehicleBodyTelemetry(PxwVehicle* vehicle, PxwVehicleBodyTelemetry* dest);
 
     PHYSX_WRAPPER_API PxRigidActor* GetVehicleActor(PxwVehicle* vehicle);
 

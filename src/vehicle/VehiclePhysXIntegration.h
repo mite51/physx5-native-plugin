@@ -135,11 +135,6 @@ struct PhysXIntegrationState
 };
 
 
-void setPhysXIntegrationParams(const PxVehicleAxleDescription&,
-	PxVehiclePhysXMaterialFriction*, PxU32 nbPhysXMaterialFrictions,
-	PxReal physXDefaultMaterialFriction, PhysXIntegrationParams&);
-
-
 //
 //This class holds the parameters, state and logic needed to implement a vehicle that
 //is using a PhysX actor to potentially interact with other objects in a PhysX scene.

@@ -279,4 +279,55 @@ namespace pxw
 		float longitudinalSpeed;
 		float lateralSpeed;
 	};
+
+	// Explicit, scene-wide vehicle simulation context. One of these is owned per PhysX scene
+	// and is immutable once the first vehicle has been registered against that scene, so every
+	// vehicle in a scene shares one update mode, one set of slip denominators and one substep
+	// policy. This replaces the previous "last vehicle to call SetVehicleFrame wins" behaviour
+	// and the hardcoded eAPPLY_ACCELERATION default.
+	struct PxwVehicleSceneContextDesc
+	{
+		// PxVehiclePhysXActorUpdateMode: 0 = eAPPLY_VELOCITY, 1 = eAPPLY_ACCELERATION.
+		int physxActorUpdateMode;
+
+		// Tire slip denominators (PxVehicleTireSlipParams). The canonical kart profile uses
+		// 0.1 / 4.0 / 1.0. A value <= 0 keeps the PhysX default for that field.
+		float minActiveLongSlipDenominator;
+		float minPassiveLongSlipDenominator;
+		float minLatSlipDenominator;
+
+		// Substep policy for the suspension/tire/wheel substep group. Below the threshold
+		// forward speed the group runs lowSubstepCount times, at or above it highSubstepCount
+		// times. The canonical kart profile uses 3 / 3 @ 5 m/s.
+		int lowSubstepCount;
+		int highSubstepCount;
+		float substepThresholdSpeed;
+	};
+
+	// Per-wheel diagnostic readback used by parity traces. Everything here is derived from the
+	// vehicle's per-step state and is scalar/world-frame so it can be logged straight to CSV or
+	// JSON and lined up against an Isaac Sim trace.
+	struct PxwVehicleWheelTelemetry
+	{
+		float jounce;                 // suspension compression from max droop (m)
+		float suspensionForce;        // suspension normal force magnitude (N)
+		float tireLoad;               // tire load fed to the tire model (N)
+		float friction;               // effective tire friction
+		float longitudinalSlip;       // normalized longitudinal slip
+		float lateralSlip;            // lateral slip angle (rad)
+		float longitudinalTireForce;  // signed force along the tire longitudinal dir (N)
+		float lateralTireForce;       // signed force along the tire lateral dir (N)
+		float rotationSpeed;          // wheel angular speed (rad/s)
+		float steerAngle;             // applied steer response (rad)
+	};
+
+	// Whole-body diagnostic readback used by parity traces.
+	struct PxwVehicleBodyTelemetry
+	{
+		PxVec3 linearVelocity;   // world-frame linear velocity (m/s)
+		PxVec3 angularVelocity;  // world-frame angular velocity (rad/s)
+		float longitudinalSpeed; // body velocity along the frame longitudinal axis (m/s)
+		float lateralSpeed;      // body velocity along the frame lateral axis (m/s)
+		float yawRate;           // body angular velocity about the frame vertical axis (rad/s)
+	};
 }

@@ -12,6 +12,14 @@ namespace pxw
 			PxScene* scene;
 			PxVehiclePhysXSimulationContext context;
 			std::vector<PxwVehicle*> vehicles;
+			// Substep policy shared by every vehicle in the scene. Defaults match the
+			// historical hardcoded substep group count of 3, applied at every speed.
+			PxU8 lowSubstepCount = 3;
+			PxU8 highSubstepCount = 3;
+			PxReal substepThresholdSpeed = 5.0f;
+			// Set true once the first vehicle is registered. The context and substep policy
+			// are immutable from then on so a finalized vehicle's context cannot change.
+			bool contextLocked = false;
 		};
 
 		bool gInitialized = false;
@@ -121,11 +129,65 @@ namespace pxw
 		SceneVehicles* entry = FindScene(scene);
 		if (!entry)
 			return;
+		// Once a vehicle is registered the scene frame is part of the frozen context; a later
+		// vehicle must not redefine the axes/scale the earlier one was finalized against.
+		if (entry->contextLocked)
+			return;
 		entry->context.frame.lngAxis = static_cast<PxVehicleAxes::Enum>(frame.lngAxis);
 		entry->context.frame.latAxis = static_cast<PxVehicleAxes::Enum>(frame.latAxis);
 		entry->context.frame.vrtAxis = static_cast<PxVehicleAxes::Enum>(frame.vrtAxis);
 		entry->context.scale.scale = frame.scale;
 		entry->context.gravity = scene->getGravity();
+	}
+
+	bool VehicleSetSceneContext(PxScene* scene, const PxwVehicleSceneContextDesc& desc)
+	{
+		SceneVehicles* entry = FindScene(scene);
+		if (!entry)
+			return false;
+
+		if (entry->contextLocked)
+		{
+			PxGetFoundation().error(PxErrorCode::eDEBUG_WARNING, __FILE__, __LINE__,
+				"VehicleSetSceneContext ignored: a vehicle is already registered against this "
+				"scene, so its context is immutable. Configure the scene context before adding "
+				"vehicles.\n");
+			return false;
+		}
+
+		entry->context.physxActorUpdateMode = (desc.physxActorUpdateMode == 1)
+			? PxVehiclePhysXActorUpdateMode::eAPPLY_ACCELERATION
+			: PxVehiclePhysXActorUpdateMode::eAPPLY_VELOCITY;
+
+		// A non-positive denominator means "keep the PhysX default".
+		if (desc.minActiveLongSlipDenominator > 0.0f)
+			entry->context.tireSlipParams.minActiveLongSlipDenominator = desc.minActiveLongSlipDenominator;
+		if (desc.minPassiveLongSlipDenominator > 0.0f)
+			entry->context.tireSlipParams.minPassiveLongSlipDenominator = desc.minPassiveLongSlipDenominator;
+		if (desc.minLatSlipDenominator > 0.0f)
+			entry->context.tireSlipParams.minLatSlipDenominator = desc.minLatSlipDenominator;
+
+		if (desc.lowSubstepCount > 0)
+			entry->lowSubstepCount = static_cast<PxU8>(desc.lowSubstepCount);
+		if (desc.highSubstepCount > 0)
+			entry->highSubstepCount = static_cast<PxU8>(desc.highSubstepCount);
+		if (desc.substepThresholdSpeed > 0.0f)
+			entry->substepThresholdSpeed = desc.substepThresholdSpeed;
+
+		return true;
+	}
+
+	PxwSceneSubstepPolicy VehicleGetSceneSubstepPolicy(PxScene* scene)
+	{
+		PxwSceneSubstepPolicy policy = { 3, 3, 5.0f };
+		SceneVehicles* entry = FindScene(scene);
+		if (entry)
+		{
+			policy.lowSubstepCount = entry->lowSubstepCount;
+			policy.highSubstepCount = entry->highSubstepCount;
+			policy.thresholdSpeed = entry->substepThresholdSpeed;
+		}
+		return policy;
 	}
 
 	void VehicleRegister(PxScene* scene, PxwVehicle* vehicle)
@@ -138,6 +200,8 @@ namespace pxw
 			if (entry->vehicles[i] == vehicle)
 				return;
 		}
+		// From the first vehicle onward the scene context is frozen.
+		entry->contextLocked = true;
 		entry->vehicles.push_back(vehicle);
 	}
 
@@ -174,6 +238,8 @@ namespace pxw
 			{
 				continue;
 			}
+			entry->vehicles[i]->SetSubstepPolicy(
+				entry->lowSubstepCount, entry->highSubstepCount, entry->substepThresholdSpeed);
 			entry->vehicles[i]->Step(dt, entry->context);
 		}
 	}

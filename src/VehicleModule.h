@@ -26,6 +26,23 @@ namespace pxw
 	void VehicleUnregisterScene(PxScene* scene);
 	void VehicleSetSceneFrame(PxScene* scene, const PxwVehicleFrameDesc& frame);
 
+	// Configure the explicit, scene-wide vehicle context: PhysX actor update mode, tire slip
+	// denominators and the substep policy shared by every vehicle in the scene. Rejected once
+	// a vehicle has already been registered against the scene, so the context a vehicle was
+	// finalized against cannot change out from under it (logs a warning and leaves the context
+	// untouched). Returns true when the context was applied.
+	bool VehicleSetSceneContext(PxScene* scene, const PxwVehicleSceneContextDesc& desc);
+
+	// Substep policy for the scene (mirrors the values in the context desc). Read by
+	// VehicleStepScene and applied to each vehicle's substep group before it steps.
+	struct PxwSceneSubstepPolicy
+	{
+		PxU8 lowSubstepCount;
+		PxU8 highSubstepCount;
+		PxReal thresholdSpeed;
+	};
+	PxwSceneSubstepPolicy VehicleGetSceneSubstepPolicy(PxScene* scene);
+
 	// Vehicle registry used for stepping.
 	void VehicleRegister(PxScene* scene, PxwVehicle* vehicle);
 	void VehicleUnregister(PxwVehicle* vehicle);

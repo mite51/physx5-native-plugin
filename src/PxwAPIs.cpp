@@ -1144,6 +1144,13 @@ void SetArticulationCacheJointForces(PxArticulationCache* cache, float* forces, 
 
 // ===================== Vehicles (PhysX Vehicle2) =====================
 
+bool SetVehicleSceneContext(PxScene* scene, PxwVehicleSceneContextDesc* desc)
+{
+    if (!scene || !desc)
+        return false;
+    return VehicleSetSceneContext(scene, *desc);
+}
+
 PxwVehicle* CreateVehicle(PxScene* scene, int driveMode, PxwVehicleChassisDesc* chassis, PxGeometry* chassisGeometry, PxMaterial* material)
 {
     if (!scene || !chassis)
@@ -1313,6 +1320,12 @@ void SetVehicleTransmissionCommand(PxwVehicle* vehicle, int targetGear, float cl
         vehicle->SetTransmissionCommand(targetGear, clutch);
 }
 
+void ResetVehicleState(PxwVehicle* vehicle)
+{
+    if (vehicle)
+        vehicle->ResetState();
+}
+
 void SetVehicleTankThrusts(PxwVehicle* vehicle, float thrust0, float thrust1)
 {
     if (vehicle)
@@ -1343,13 +1356,24 @@ void GetVehicleDriveState(PxwVehicle* vehicle, PxwVehicleDriveState* dest)
         vehicle->GetDriveState(dest);
 }
 
+void GetVehicleWheelTelemetry(PxwVehicle* vehicle, PxwVehicleWheelTelemetry* destArray, int length)
+{
+    if (vehicle)
+        vehicle->GetWheelTelemetry(destArray, length);
+}
+
+void GetVehicleBodyTelemetry(PxwVehicle* vehicle, PxwVehicleBodyTelemetry* dest)
+{
+    if (vehicle)
+        vehicle->GetBodyTelemetry(dest);
+}
+
 PxRigidActor* GetVehicleActor(PxwVehicle* vehicle)
 {
     if (!vehicle)
         return NULL;
     return vehicle->GetActor();
 }
-
 
 
 

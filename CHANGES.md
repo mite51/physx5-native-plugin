@@ -2,6 +2,22 @@
 
 This document describes changes made to the native plugin: first the PhysX 5.6.1 upgrade, then the robot-removal / vehicle-support refactor.
 
+## Arcade tuner support (2026-09-10)
+
+`ResetVehicleState` clears wheel, suspension, sticky-tire and drivetrain integrators plus commands
+between simulation steps. It retains the native chassis, its pose/velocities and all parameters.
+Call it alongside a teleport for an in-place gameplay reset; network code must execute it in the
+replayable before-step handler. Direct and engine drive tests verify reset, actor/construction
+preservation and reset after snapshot restoration under both solvers.
+
+`SetVehicleTireFrictionTable` now refreshes every finalized wheel's bound material table pointer,
+count and default friction. Previously it changed only the wrapper's storage, leaving the solver's
+bound default stale and potentially retaining a pointer invalidated by vector reallocation.
+Native telemetry tests verify that live default-friction changes reach tires.
+
+The updated native suite passes 284 checks. These tests do not establish Unity kart handling parity;
+the PACK project's `Assets/PACK/KartTest/PORT_VALIDATION.md` tracks those measurements separately.
+
 ## Convex core geometry, collision filtering and configurable vehicle wheel shapes
 
 ### Convex core geometry
